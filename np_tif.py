@@ -7,7 +7,7 @@ def tif_to_array(
     ):
     """Load a tif into memory and return it as a numpy array.
 
-    This is primarily a tool I use to interact with ImageJ, so that's
+    This is primarily a tool we use to interact with ImageJ, so that's
     the only case it's really been debugged for. I bet somebody made
     nice python bindings for LibTIFF, if you want a more general purpose
     reader.
