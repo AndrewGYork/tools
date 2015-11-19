@@ -176,6 +176,7 @@ class Edge:
             assert len(out.shape) == 3
             assert (out.shape[0] - first_frame) >= (num_images - preframes)
             assert (out.shape[1], out.shape[2]) == (self.height, self.width)
+            assert out.dtype == np.uint16
         except AssertionError:
             print("\nInput argument 'out' must have dimensions:")
             print("(>=num_images - preframes, y-resolution, x-resolution)")
@@ -249,6 +250,9 @@ class Edge:
                           hex(self._dll_status.value),
                           hex(self._driver_status.value))
                 if which_im >= preframes:
+                    """
+                    http://stackoverflow.com/a/13481676
+                    """
                     image = np.ctypeslib.as_array( #Temporary!
                         self._image_datatype.from_address(
                             C.addressof(
