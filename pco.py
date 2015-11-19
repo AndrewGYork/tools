@@ -199,7 +199,7 @@ class Edge:
             """
             num_polls = 0
             num_sleeps = 0
-            start_time = time.clock()
+            start_time = time.perf_counter()
             while True:
                 """
                 Check if a buffer is ready
@@ -233,7 +233,7 @@ class Edge:
                 (likely triggered by long exposures)
                 """
                 if num_polls > poll_timeout or num_sleeps > sleep_timeout:
-                    elapsed_time = time.clock() - start_time
+                    elapsed_time = time.perf_counter() - start_time
                     raise TimeoutError(
                         "After %i polls,"%(num_polls) + 
                         " %i sleeps"%(num_sleeps) + 
@@ -861,9 +861,9 @@ if __name__ == '__main__':
               images.shape[0] *
               1e-6 * max(camera.rolling_time_microseconds,
                          camera.exposure_time_microseconds))
-        start = time.clock()
+        start = time.perf_counter()
         camera.record_to_memory(num_images=images.shape[0], out=images)
-        print("Elapsed time:", time.clock() - start)
+        print("Elapsed time:", time.perf_counter() - start)
         
         print(images.min(), images.max(), images.shape)
         camera.disarm()
