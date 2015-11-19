@@ -161,7 +161,7 @@ class Edge:
         out=None,
         first_frame=0,
         poll_timeout=5e5,
-        sleep_timeout=20,
+        sleep_timeout=40,
         ):
         if not self.armed: self.arm()
         """
@@ -223,7 +223,8 @@ class Edge:
                 to save CPU.
                 """
                 if self.exposure_time_microseconds > 30e3:
-                    time.sleep(self.exposure_time_microseconds * 5e-8)
+                    time.sleep(self.exposure_time_microseconds * 1e-6 * #seconds
+                               2 / sleep_timeout) #Worst case
                     num_sleeps += 1
                 """
                 At some point we have to admit we probably missed a
@@ -234,8 +235,10 @@ class Edge:
                 if num_polls > poll_timeout or num_sleeps > sleep_timeout:
                     elapsed_time = time.clock() - start_time
                     raise TimeoutError(
-                        "After %i polls and %0.3f seconds, no buffer."%(
-                            poll_timeout, elapsed_time),
+                        "After %i polls,"%(num_polls) + 
+                        " %i sleeps"%(num_sleeps) + 
+                        " and %0.3f seconds,"%(elapsed_time) + 
+                        " no buffer. (%i acquired)"%(num_acquired),
                         num_acquired=num_acquired)
             try:
                 if self._driver_status.value == 0x0:
@@ -546,14 +549,20 @@ class Edge:
         """
         There are lots of ways a requested region of interest (ROI) can
         be illegal. This utility function returns a nearby legal ROI.
+
+        Optionally, you can leave keys of 'roi' unspecified, and
+        _legalize_roi() tries to return reasonable choices based on
+        the current values in self.roi
         """
-        left, right = roi['left'], roi['right']
-        bottom, top = roi['bottom'], roi['top']
+        left = roi.get('left')
+        right = roi.get('right')
+        bottom = roi.get('bottom')
+        top = roi.get('top')
         if self.verbose:
             print(" Requested camera ROI:")
             print("  From pixel", left, "to pixel", right, "(left/right)")
             print("  From pixel", top, "to pixel", bottom, "(up/down)")
-        min_lr, min_ud, min_height = 1, 1, 8
+        min_lr, min_ud, min_height = 1, 1, 10
         if self.pco_edge_type == '4.2':
             max_lr, max_ud, min_width, step_lr = 2060, 2048, 40, 20
         elif self.pco_edge_type == '5.5':
@@ -561,28 +570,75 @@ class Edge:
         """
         Legalize left/right
         """
-        if left < min_lr:
-            left = min_lr
-        elif left > max_lr - min_width + 1:
-            left = max_lr - min_width + 1
+        if left is None and right is None:
+            """
+            User isn't trying to change l/r ROI; use existing ROI.
+            """
+            left, right = self.roi['left'], self.roi['right']
+        elif left is not None:
+            """
+            'left' is specified, 'left' is the master.
+            """
+            if left < min_lr: #Legalize 'left'
+                left = min_lr
+            elif left > max_lr - min_width + 1:
+                left = max_lr - min_width + 1
+            else:
+                left = 1 + step_lr*((left - 1) // step_lr)
+            if right is None: #Now legalize 'right'
+                right = self.roi['right']
+            if right < left + min_width - 1:
+                right = left + min_width - 1
+            elif right > max_lr:
+                right = max_lr
+            else:
+                right = left - 1 + step_lr*((right - (left - 1)) // step_lr)
         else:
-            left = 1 + step_lr*((left - 1) // step_lr)
-        if right < left + min_width - 1:
-            right = left + min_width - 1
-        elif right > max_lr:
-            right = max_lr
-        else:
-            right = left - 1 + step_lr*((right - (left - 1))//step_lr)
-        assert min_lr <= left < right <= max_lr
+            """
+            'left' is unspecified, 'right' is specified. 'right' is the master.
+            """
+            if right > max_lr: #Legalize 'right'
+                right = max_lr
+            elif right < min_lr - 1 + min_width:
+                right = min_width
+            else:
+                right = step_lr * (right  // step_lr)
+            left = self.roi['left'] #Now legalize 'left'
+            if left > right - min_width + 1:
+                left = right - min_width + 1
+            elif left < min_lr:
+                left = min_lr
+            else:
+                left = right + 1 - step_lr * ((right - (left - 1)) // step_lr)
+        assert min_lr <= left < left + min_width - 1 <= right <= max_lr
         """
         Legalize top/bottom
         """
-        if top < min_ud:
-            top = min_ud
-        if top > (max_ud - min_height)//2 + 1:
-            top = (max_ud - min_height)//2 + 1
-        bottom = max_ud - top + 1
-        assert min_ud <= top < bottom <= max_ud
+        if top is None and bottom is None:
+            """
+            User isn't trying to change u/d ROI; use existing ROI.
+            """
+            top, bottom = self.roi['top'], self.roi['bottom']
+        elif top is not None:
+            """
+            'top' is specified, 'top' is the master.
+            """
+            if top < min_ud: #Legalize 'top'
+                top = min_ud
+            if top > (max_ud - min_height)//2 + 1:
+                top = (max_ud - min_height)//2 + 1
+            bottom = max_ud - top + 1 #Now bottom is specified
+        else:
+            """
+            'top' is unspecified, 'bottom' is specified, 'bottom' is the
+            master.
+            """
+            if bottom > max_ud: #Legalize 'bottom'
+                bottom = max_ud
+            if bottom < (max_ud + min_height)//2:
+                bottom = (max_ud + min_height)//2
+            top = max_ud - bottom + 1 #Now 'top' is specified
+        assert min_ud <= top < top + min_height - 1 <= bottom <= max_ud
         new_roi = {'left': left,
                    'top': top,
                    'right': right,
@@ -775,23 +831,40 @@ dll.set_storage_mode = dll.PCO_SetStorageMode
 dll.set_storage_mode.argtypes = [C.c_void_p, C.c_uint16]
 
 if __name__ == '__main__':
+    """
+    Half-assed testing; give randomized semi-garbage inputs, hope the
+    plane don't crash.
+    """
     camera = Edge()
-    camera.apply_settings(exposure_time_microseconds=100,
-                          region_of_interest={
-                              'top': 901,
-                              'bottom': 1700,
-                              'left': 100,
-                              'right': 1500})
-    camera.arm(num_buffers=2)
-    print("Allocating memory...")
-    images = np.zeros((1200, camera.height, camera.width), dtype=np.uint16)
-    print("Done allocating memory.")
-    print("Expected time:", images.shape[0] *
-          camera.rolling_time_microseconds * 1e-6)
-    start = time.clock()
-    camera.record_to_memory(num_images=images.shape[0], out=images)
-    print("Elapsed time:", time.clock() - start)
-    
-    print(images.min(), images.max(), images.shape)
-    camera.disarm()
+    for i in range(10000):
+        """
+        Random exposure time, biased towards shorter exposures
+        """
+        exposure = min(np.random.randint(1e2, 1e7, size=40))
+        """
+        Random ROI, potentially with some/all limits unspecified.
+        """
+        roi = {
+            'top': np.random.randint(low=-2000, high=3000),
+            'bottom': np.random.randint(low=-2000, high=3000),
+            'left': np.random.randint(low=-2000, high=3000),
+            'right': np.random.randint(low=-2000, high=3000)}
+        roi = {k: v for k, v in roi.items() if v > -10} #Delete some keys/vals
+        camera.apply_settings(exposure_time_microseconds=exposure,
+                              region_of_interest=roi)
+        camera.arm(num_buffers=np.random.randint(1, 16))
+        print("Allocating memory...")
+        images = np.zeros((np.random.randint(1, 5), camera.height, camera.width),
+                          dtype=np.uint16)
+        print("Done allocating memory.")
+        print("Expected time:",
+              images.shape[0] *
+              1e-6 * max(camera.rolling_time_microseconds,
+                         camera.exposure_time_microseconds))
+        start = time.clock()
+        camera.record_to_memory(num_images=images.shape[0], out=images)
+        print("Elapsed time:", time.clock() - start)
+        
+        print(images.min(), images.max(), images.shape)
+        camera.disarm()
     camera.close()
