@@ -26,6 +26,7 @@ class Edge:
         return None                            
 
     def close(self):
+        if self.armed: self.disarm()
         if self.verbose: print("Closing pco.edge camera...")
         dll.close_camera(self.camera_handle)
         if self.verbose: print(" Camera closed.")
