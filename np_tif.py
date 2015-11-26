@@ -341,8 +341,8 @@ def interpret_ifd_entry(file, entry, endian, verbose):
         else:
             value_list = []
             for n in range(num_values):
-                value_list.append(bytes_to_int(value[value_size_bytes * n:
-                                                     value_size_bytes *(n+1)],
+                value_list.append(bytes_to_int(value[bytes_per_count * n:
+                                                     bytes_per_count *(n+1)],
                                                endian))
             value = value_list
 ##    elif field_type == 'ASCII':
