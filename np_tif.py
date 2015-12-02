@@ -335,7 +335,7 @@ def interpret_ifd_entry(file, entry, endian, verbose):
     We still haven't converted the value from bytes yet, but at least we
     got the correct bytes that encode the value.
     """
-    if field_type in ('BYTE', 'SHORT', 'LONG'):
+    if field_type in ('BYTE', 'SHORT', 'LONG'): #TODO: return this as a numpy array?
         if num_values == 1:
             value = bytes_to_int(value, endian)
         else:
