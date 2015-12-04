@@ -173,20 +173,7 @@ class Image_Data_Pipeline:
 ##                    p.commands.recv()
 ##                    break
 ##        return None
-##    
-##    def set_display_intensity_scaling(
-##        self, scaling, display_min=None, display_max=None):
-##        args = locals()
-##        args.pop('self')
-##        self.display.commands.send(('set_intensity_scaling', args))
-##        return self.display.commands.recv()
-##
-##    def get_display_intensity_scaling(self):
-##        return self.display.get_intensity_scaling()
-##
-##    def withdraw_display(self):
-##        self.display.commands.send(('withdraw', {}))
-##
+
 ##    def check_children(self):
 ##        return {'Camera': self.camera.child.is_alive(),
 ##                'Accumulation': self.accumulation.child.is_alive(),
@@ -259,7 +246,7 @@ def dummy_camera_child_process(
     fake_data = [np.zeros(buffer_size, dtype=np.uint16)
                  for i in data_buffers]
     for i, d in enumerate(fake_data):
-        d.fill(int((2**16 - 1) * (i + 1.0) / len(fake_data)))
+        d.fill(int((2**16 - 1) * (i + 1) / len(fake_data)))
     data_idx = -1
     while True:
         """
@@ -357,15 +344,14 @@ def pco_edge_camera_child_process(
     while True:
         if commands.poll():
             cmd, args = commands.recv()
+            if cmd == 'apply_settings':
+                settings = camera.apply_settings(**args)
+                camera.arm()
+                commands.send(settings)
 ##            if cmd == 'set_buffer_shape':
 ##                buffer_shape = args['shape']
 ##                buffer_size = np.prod(buffer_shape)
 ##                commands.send(buffer_shape)
-##            elif cmd == 'apply_settings':
-##                settings = camera.apply_settings(**args)
-##                camera.arm()
-##                camera._prepare_to_record_to_memory()
-##                commands.send(settings)
 ##            elif cmd == 'get_settings':
 ##                commands.send(camera.get_settings(**args))
 ##            elif cmd == 'get_status':
@@ -383,7 +369,9 @@ def pco_edge_camera_child_process(
 ##            elif cmd == 'set_timeout':
 ##                timeout = args['timeout']
 ##                commands.send(timeout)
-            continue #ignore commands we don't recognize. Bad idea?
+            else:
+                info("Unrecognized command")
+                continue
         try:
             permission_slip = input_queue.get_nowait()
         except Q.Empty:
@@ -648,30 +636,38 @@ class Data_Pipeline_Display:
         ):
         self.projection_buffer_input_queue = projection_buffer_input_queue
         self.projection_buffer_output_queue = projection_buffer_output_queue
-
         self.commands, self.child_commands = mp.Pipe()
-##        self.display_intensity_scaling_queue = mp.Queue()
-##        self.display_intensity_scaling = ('linear', 0, 2**16 - 1)
-
+        self.intensity_min = mp.Value(C.c_uint16, 0, lock=False)
+        self.intensity_max = mp.Value(C.c_uint16, 2**16 - 1, lock=False)
         self.child = mp.Process(
             target=display_child_process,
             args=(projection_buffers, buffer_shape,
                   self.projection_buffer_input_queue,
                   self.projection_buffer_output_queue,
                   self.child_commands,
-                  #self.display_intensity_scaling_queue,
+                  self.intensity_min,
+                  self.intensity_max,
                   ),
             name='Display')
         self.child.start()
+        self.set_intensity_scaling('linear')
         return None
 
-##    def get_intensity_scaling(self):
-##        try:
-##            self.display_intensity_scaling = (
-##                self.display_intensity_scaling_queue.get_nowait())
-##        except Queue.Empty:
-##            pass
-##        return self.display_intensity_scaling
+    def set_intensity_scaling(
+        self,
+        scaling,
+        display_min=None,
+        display_max=None,
+        ):
+        args = locals()
+        args.pop('self')
+        self.commands.send(('set_intensity_scaling', args))
+        self.intensity_scaling = self.commands.recv()
+        return self.intensity_scaling
+
+    def withdraw(self):
+        self.commands.send(('withdraw', {}))
+        return self.commands.recv()
 
 def display_child_process(
     projection_buffers,
@@ -679,7 +675,8 @@ def display_child_process(
     input_queue,
     output_queue,
     commands,
-    #display_intensity_scaling_queue,
+    intensity_min,
+    intensity_max,
     ):
     args = locals()
     display = Display(**args)
@@ -694,7 +691,8 @@ class Display:
         input_queue,
         output_queue,
         commands,
-        #display_intensity_scaling_queue,
+        intensity_min,
+        intensity_max
         ):
         import pyglet
         self.pyg = pyglet
@@ -710,9 +708,9 @@ class Display:
         self._array_to_image = ArrayInterfaceImage
         try:
             from scipy import ndimage #Median filtering autoscale, noncrucial
-            self.ndimage = ndimage
+            self._ndimage = ndimage
         except ImportError:
-            self.ndimage = None
+            self._ndimage = None
 
         self.projection_buffers = projection_buffers
         self.buffer_shape = buffer_shape
@@ -720,24 +718,19 @@ class Display:
         self.input_queue = input_queue
         self.output_queue = output_queue
         self.commands = commands
-        #self.display_intensity_scaling_queue = display_intensity_scaling_queue
-        #self.set_intensity_scaling('linear', display_min=0, display_max=2**16-1)
+        self.display_min = intensity_min.value
+        self.display_max = intensity_max.value
+        self.set_intensity_scaling('linear', display_min=0, display_max=2**16-1)
+        self.display_data = np.empty(self.buffer_shape[1:], dtype=np.uint8)
         self.projection_buffers[1].get_lock().acquire()
         self.current_projection_buffer = 1
         self.switch_buffers(0)
-        self.display_data = np.empty(self.buffer_shape[1:], dtype=np.uint8)
-        self.display_min, self.display_max = 50, 150 #FIXME (temporary)
-        self._make_linear_lookup_table() #FIXME (temporary)
-        self.convert_to_8_bit()
         self.make_window()
         update_interval_seconds = 0.025
         self.pyg.clock.schedule_interval(self.update, update_interval_seconds)
         return None
 
     def run(self):
-##        """
-##        Eventually put code here to deal with closing and re-opening the window.
-##        """
         self.pyg.app.run()
         return None
 
@@ -757,23 +750,21 @@ class Display:
             self.quit()
         else:
             self.switch_buffers(switch_to_me)
-            self.convert_to_8_bit()
         return None
 
     def make_window(self):
         screen_width, screen_height = self._get_screen_dimensions()
-
         self.window = self.pyg.window.Window(
             min(screen_width//2, screen_height),
             min(screen_width//2, screen_height),
             caption='Display',
             resizable=True)
-##        self.window.set_location(int((screen_width * 0.95) // 2),
-##                                 screen_height//20)
-##        self.default_image_scale = min(
-##            (screen_width//2) * 1.0 / self.image.width,
-##            screen_height * 1.0 / self.image.height)
-##        self.image_scale = self.default_image_scale
+        self.window.set_location(int((screen_width * 0.95) // 2),
+                                 screen_height//20)
+        self.default_image_scale = min(
+            (screen_width//2) / self.image.width,
+            screen_height / self.image.height)
+        self.image_scale = self.default_image_scale
         self.image_x, self.image_y = 0, 0
         @self.window.event
         def on_draw():
@@ -781,80 +772,85 @@ class Display:
             self.image.blit(
                 x=self.image_x,
                 y=self.image_y,
-##                height=int(self.image.height * self.image_scale),
-##                width=int(self.image.width * self.image_scale)
+                height=int(self.image.height * self.image_scale),
+                width=int(self.image.width * self.image_scale),
                 )
+        """
+        Allow the user to pan and zoom the image
+        """
+        @self.window.event
+        def on_mouse_drag(x, y, dx, dy, buttons, modifiers):
+            if buttons == self.pyg.window.mouse.LEFT:
+                self.image_x += dx
+                self.image_y += dy
+            self._enforce_panning_limits()
 
-##        """
-##        Allow the user to pan and zoom the image
-##        """
-##        @self.window.event
-##        def on_mouse_drag(x, y, dx, dy, buttons, modifiers):
-##            if buttons == self.pyg.window.mouse.LEFT:
-##                self.image_x += dx
-##                self.image_y += dy
-##            self._enforce_panning_limits()
-##
-##        @self.window.event
-##        def on_mouse_scroll(x, y, scroll_x, scroll_y):
-##            old_image_scale = self.image_scale
-##            self.image_scale *= 1.3**(scroll_y)
-##            """
-##            No sense letting the user make the image underfill the window
-##            """
-##            while (self.image.width * self.image_scale < self.window.width and
-##                   self.image.height * self.image_scale < self.window.height):
-##                self.image_scale = min(
-##                    self.window.width * 1.0 / self.image.width,
-##                    self.window.height * 1.0 / self.image.height)
-##            """
-##            Might as well set some sane zoom limits, too.
-##            """
-##            if self.image_scale < 0.01:
-##                self.image_scale = 0.01
-##            if self.image_scale > 300:
-##                self.image_scale = 300
-##            """
-##            Center the origin of the zoom on the mouse coordinate.
-##            This was kinda thinky to figure out, don't fuck with this lightly.
-##            """
-##            zoom = self.image_scale * 1.0 / old_image_scale
-##            self.image_x = self.image_x * zoom + x * (1 - zoom)
-##            self.image_y = self.image_y * zoom + y * (1 - zoom)
-##            self._enforce_panning_limits()
-##        
-##        @self.window.event
-##        def on_mouse_release(x, y, button, modifiers):
-##            self.last_mouse_release = (x, y, button, clock())
-##
-##        @self.window.event
-##        def on_mouse_press(x, y, button, modifiers):
-##            if hasattr(self, 'last_mouse_release'):
-##                if (x, y, button) == self.last_mouse_release[:-1]:
-##                    """Same place, same button"""
-##                    if clock() - self.last_mouse_release[-1] < 0.2:
-##                        """We got ourselves a double-click"""
-##                        self.image_scale = self.default_image_scale
-##                        self.image_x = 0
-##                        self.image_y = 0
-##                        w, h = self._get_screen_dimensions()
-##                        edge_length = min(w//2, h)
-##                        self.window.width = edge_length
-##                        self.window.height = edge_length            
-##        """
-##        We don't want 'escape' or 'quit' to quit the pyglet
-##        application, just withdraw it. The parent application should
-##        control when pyglet quits.
-##        """
-##        @self.window.event
-##        def on_key_press(symbol, modifiers):
-##            if symbol == self.pyg.window.key.ESCAPE:
-##                self.window.set_visible(False)
-##                return self.pyg.event.EVENT_HANDLED
-##        @self.window.event
-##        def on_close():
-##            self.window.set_visible(False)
-##            return self.pyg.event.EVENT_HANDLED
+        @self.window.event
+        def on_mouse_scroll(x, y, scroll_x, scroll_y):
+            old_image_scale = self.image_scale
+            self.image_scale *= 1.3**(scroll_y)
+            """
+            No sense letting the user make the image underfill the window
+            """
+            while (self.image.width * self.image_scale < self.window.width and
+                   self.image.height * self.image_scale < self.window.height):
+                self.image_scale = min(
+                    self.window.width / self.image.width,
+                    self.window.height / self.image.height)
+            """
+            Might as well set some sane zoom limits, too.
+            """
+            if self.image_scale < 0.01:
+                self.image_scale = 0.01
+            if self.image_scale > 300:
+                self.image_scale = 300
+            """
+            Center the origin of the zoom on the mouse coordinate.
+            This was kinda thinky to figure out, don't fuck with this lightly.
+            """
+            zoom = self.image_scale / old_image_scale
+            self.image_x = self.image_x * zoom + x * (1 - zoom)
+            self.image_y = self.image_y * zoom + y * (1 - zoom)
+            self._enforce_panning_limits()
+        """
+        If the user double-clicks, reset to default zoom and
+        position. A nice way to reset if you get lost. Of course,
+        detecting double-clicks is not directly possible in
+        pyglet... http://stackoverflow.com/q/22968164
+        """
+        @self.window.event
+        def on_mouse_release(x, y, button, modifiers):
+            self._last_mouse_release = (x, y, button, clock())
+            
+        @self.window.event
+        def on_mouse_press(x, y, button, modifiers):
+            if hasattr(self, '_last_mouse_release'):
+                if (x, y, button) == self._last_mouse_release[:-1]:
+                    """Same place, same button"""
+                    if clock() - self._last_mouse_release[-1] < 0.2:
+                        """We got ourselves a double-click"""
+                        self.image_scale = self.default_image_scale
+                        self.image_x = 0
+                        self.image_y = 0
+                        w, h = self._get_screen_dimensions()
+                        edge_length = min(w//2, h)
+                        self.window.width = edge_length
+                        self.window.height = edge_length
+                        self.window.set_location(int((w * 0.95) // 2), h//20)
+        """
+        We don't want 'escape' or 'quit' to quit the pyglet
+        application, just withdraw it. The parent application should
+        control when pyglet quits.
+        """
+        @self.window.event
+        def on_key_press(symbol, modifiers):
+            if symbol == self.pyg.window.key.ESCAPE:
+                self.window.set_visible(False)
+                return self.pyg.event.EVENT_HANDLED
+        @self.window.event
+        def on_close():
+            self.window.set_visible(False)
+            return self.pyg.event.EVENT_HANDLED
 
     def execute_external_command(self):
         """
@@ -863,13 +859,9 @@ class Display:
         the tuple is a dict of arguments to the command.
         """
         cmd, args = self.commands.recv()
-##        if cmd == 'set_intensity_scaling':
-##            response = self.set_intensity_scaling(**args)
-##            self.commands.send(response)
-##        elif cmd == 'get_intensity_scaling':
-##            self.commands.send((self.intensity_scaling,
-##                                self.display_min,
-##                                self.display_max))
+        if cmd == 'set_intensity_scaling':
+            response = self.set_intensity_scaling(**args)
+            self.commands.send(response)
 ##        elif cmd == 'set_buffer_shape':
 ##            self.buffer_shape = args['shape']
 ##            self.display_buffer_size = np.prod(self.buffer_shape[1:])
@@ -889,8 +881,9 @@ class Display:
 ##                self.pyg.gl.GL_NEAREST)
 ##            self.window.set_size(self.image.width, self.image.height)
 ##            self.commands.send(self.buffer_shape)
-##        elif cmd == 'withdraw':
-##            self.window.set_visible(False)
+        elif cmd == 'withdraw':
+            self.window.set_visible(False)
+            self.commands.send(None)
 ##        else:
 ##            raise UserWarning("Command not recognized: %s, %s"%(
 ##                repr(cmd), repr(args)))
@@ -912,88 +905,76 @@ class Display:
             self.projection_buffers[self.current_projection_buffer].get_obj(),
             dtype=np.uint16)[:self.projection_buffer_size
                              ].reshape(self.buffer_shape[1:])
+        if self.intensity_scaling == 'autoscale':
+            self.display_min = self.projection_data.min()
+            self.display_max = self.projection_data.max()
+            self._make_lookup_table()
+        elif self.intensity_scaling == 'median_filter_autoscale':
+            filtered_image = self._ndimage.filters.median_filter(
+                self.projection_data, size=3, output=self.median_filtered_image)
+            self.display_min = self.median_filtered_image.min()
+            self.display_max = self.median_filtered_image.max()
+            self._make_lookup_table()
+        self.convert_to_8_bit()
         return None
 
     def convert_to_8_bit(self):
         """
         Convert 16-bit projections to 8-bit display data using a lookup table.
         """
-##        if self.intensity_scaling == 'autoscale':
-##            self.display_min = self.display_data_16.min()
-##            self.display_max = self.display_data_16.max()
-##            self._make_linear_lookup_table()
-##        elif self.intensity_scaling == 'median_filter_autoscale':
-##            filtered_image = self.ndimage.filters.median_filter(
-##                self.display_data_16, size=3, output=self.filtered_image)
-##            self.display_min = self.filtered_image.min()
-##            self.display_max = self.filtered_image.max()
-##            self._make_linear_lookup_table()
         np.take(self.lut, self.projection_data, out=self.display_data)
-        print(self._lut_start.min(), self._lut_start.max())
-        print(self._lut_intermediate.min(), self._lut_intermediate.max())
-        print(self.lut.min(), self.lut.max())
-        print(self.projection_data.min(), self.projection_data.max())
-        print(self.display_data.min(), self.display_data.max())
-##        try:
-##            self.display_intensity_scaling_queue.get_nowait()
-##        except Queue.Empty:
-##            pass
-##        self.display_intensity_scaling_queue.put(
-##            (self.intensity_scaling, self.display_min, self.display_max))
         self.image = self._array_to_image(self.display_data, allow_copy=False)
-##        self.pyg.gl.glTexParameteri( #Reset to no interpolation
-##                self.pyg.gl.GL_TEXTURE_2D,
-##                self.pyg.gl.GL_TEXTURE_MAG_FILTER,
-##                self.pyg.gl.GL_NEAREST)
-##        if hasattr(self, 'window'):
-##            if not self.window.visible:
-##                self.window.set_visible(True)
+        self.pyg.gl.glTexParameteri( #Reset to no interpolation
+                self.pyg.gl.GL_TEXTURE_2D,
+                self.pyg.gl.GL_TEXTURE_MAG_FILTER,
+                self.pyg.gl.GL_NEAREST)
+        if hasattr(self, 'window'):
+            if not self.window.visible:
+                self.window.set_visible(True)
         return None
 
-##    def set_intensity_scaling(self, scaling, display_min, display_max):
-##        if scaling == 'linear':
-##            self.intensity_scaling = 'linear'
-##            if display_min is not None and display_max is not None:
-##                if display_min < 0:
-##                    display_min = 0
-##                if display_min > (2**16 - 2):
-##                    display_min = (2**16 - 2)
-##                if display_max <= display_min:
-##                    display_max = display_min + 1
-##                if display_max > (2**16 - 1):
-##                    display_max = 2**16 - 1
-##                self.display_min = display_min
-##                self.display_max = display_max
-##                self._make_linear_lookup_table()
-##        elif scaling == 'autoscale':
-##            self.intensity_scaling = 'autoscale'
-##            self.display_min = self.display_data_16.min()
-##            self.display_max = self.display_data_16.max()
-##            self._make_linear_lookup_table()
-##        elif scaling == 'median_filter_autoscale':
-##            if self.ndimage is None:
-##                info("Median filter autoscale requires Scipy. " +
-##                     "Using min/max autoscale.")
-##                self.intensity_scaling = 'autoscale'
-##                self.display_min = self.display_data_16.min()
-##                self.display_max = self.display_data_16.max()
-##            else:
-##                self.intensity_scaling = 'median_filter_autoscale'
-##                if not hasattr(self, 'filtered_image'):
-##                    self.filtered_image = np.empty(
-##                        self.buffer_shape[1:], dtype=np.uint16)
-##                filtered_image = self.ndimage.filters.median_filter(
-##                    self.display_data_16, size=3, output=self.filtered_image)
-##                self.display_min = self.filtered_image.min()
-##                self.display_max = self.filtered_image.max()
-##            self._make_linear_lookup_table()
-##        else:
-##            raise UserWarning("Scaling not recognized:, %s"%(repr(scaling)))
-##        if hasattr(self, 'display_data_16'):
-##            self.convert_to_8_bit()
-##        return scaling, display_min, display_max
+    def set_intensity_scaling(self, scaling, display_min, display_max):
+        if scaling is 'median_filter_autoscale' and self._ndimage is None:
+            info("Median filter autoscale requires Scipy. " +
+                 "Using min/max autoscale.")
+            scaling = 'autoscale'
+        self.intensity_scaling = scaling
+        if scaling == 'linear': #If display_min/max are None, leave'em be.
+            if display_min is not None:
+                assert int(display_min) == display_min
+                if display_min < 0:
+                    display_min = 0
+                if display_min > (2**16 - 2):
+                    display_min = (2**16 - 2)
+                self.display_min = display_min
+            if display_max is not None:
+                assert int(display_max) == display_max
+                if display_max <= self.display_min:
+                    display_max = self.display_min + 1
+                if display_max > (2**16 - 1):
+                    display_max = 2**16 - 1
+                self.display_max = display_max
+        elif scaling == 'autoscale':
+            self.display_min = self.projection_data.min()
+            self.display_max = self.projection_data.max()
+        elif scaling == 'median_filter_autoscale':
+            if not hasattr(self, 'median_filtered_image'):
+                self.median_filtered_image = np.empty(
+                    self.buffer_shape[1:], dtype=np.uint16)
+            filtered_image = self._ndimage.filters.median_filter(
+                self.projection_data, size=3, output=self.median_filtered_image)
+            self.display_min = self.median_filtered_image.min()
+            self.display_max = self.median_filtered_image.max()
+        else:
+            raise UserWarning("Scaling not recognized:, %s"%(repr(scaling)))
+        self._make_lookup_table()
+        if hasattr(self, 'projection_data'):
+            self.convert_to_8_bit()
+        return {'type': scaling,
+                'min': self.display_min,
+                'max': self.display_max}
     
-    def _make_linear_lookup_table(self):
+    def _make_lookup_table(self):
         """
         Waaaaay faster than how I was doing it before.
         http://stackoverflow.com/q/14464449/513688
@@ -1008,7 +989,7 @@ class Display:
                 out=self._lut_intermediate)
         self._lut_intermediate -= self.display_min
         self._lut_intermediate //= (
-            self.display_max - self.display_min + 1.) / 256.
+            self.display_max - self.display_min + 1) / 256
         self.lut[:] = self._lut_intermediate.view(np.uint8)[::2] #Too sneaky?
         return None
 
@@ -1018,20 +999,20 @@ class Display:
         screen = disp.get_default_screen()
         return screen.width, screen.height
 
-##    def _enforce_panning_limits(self):
-##        if self.image_x < (self.window.width -
-##                           self.image.width*self.image_scale):
-##            self.image_x = (self.window.width -
-##                            self.image.width*self.image_scale)
-##        if self.image_y < (self.window.height -
-##                           self.image.height*self.image_scale):
-##            self.image_y = (self.window.height -
-##                            self.image.height*self.image_scale)
-##        if self.image_x > 0:
-##            self.image_x = 0
-##        if self.image_y > 0:
-##            self.image_y = 0
-##        return None
+    def _enforce_panning_limits(self):
+        if self.image_x < (self.window.width -
+                           self.image.width*self.image_scale):
+            self.image_x = (self.window.width -
+                            self.image.width*self.image_scale)
+        if self.image_y < (self.window.height -
+                           self.image.height*self.image_scale):
+            self.image_y = (self.window.height -
+                            self.image.height*self.image_scale)
+        if self.image_x > 0:
+            self.image_x = 0
+        if self.image_y > 0:
+            self.image_y = 0
+        return None
 
 class Data_Pipeline_File_Saving:
     def __init__(
@@ -1121,24 +1102,33 @@ if __name__ == '__main__':
 
     idp = Image_Data_Pipeline(
         num_buffers=5,
-        buffer_shape=(1, 2048, 2060),
+        buffer_shape=(1, 250, 120),
         camera_child_process='pco')
-##    idp.camera.commands.send(
-##        ('apply_settings',
-##         {'trigger': 'auto trigger',
-##          'region_of_interest': (-1, -1, 10000, 10000),
-##          'exposure_time_microseconds': 10000}))
-##    idp.set_display_intensity_scaling(scaling='autoscale')
-##    print idp.camera.commands.recv()
+    idp.display.set_intensity_scaling('median_filter_autoscale')
+    idp.display.withdraw()
+    idp.camera.commands.send(
+        ('apply_settings',
+         {'trigger': 'auto_trigger',
+          'region_of_interest': {'left': 481,
+                                 'right': 600,
+                                 'top': 900,
+                                 'bottom': 1149},
+          'exposure_time_microseconds': 10000}))
+    print(idp.camera.commands.recv())
+    num_slips = 0
     while True:
         try:
 ##            print idp.check_children()
 ##            idp.collect_data_buffers()
 ##            idp.load_data_buffers(len(idp.idle_data_buffers))
-            input()
             idp.camera.input_queue.put({'which_buffer': 0,
 ##                                        'file_info': {'filename': 'test.tif'}
                                         })
+            idp.file_saving.output_queue.get()
+            input()
+            num_slips += 1
+            if num_slips > 1:
+                idp.display.set_intensity_scaling(scaling='linear')
 ####            idp.set_buffer_shape((idp.buffer_shape[0],
 ####                                  idp.buffer_shape[1],
 ####                                  idp.buffer_shape[2] - 10))
