@@ -424,7 +424,7 @@ def get_bytes_from_file(file, offset, num_bytes):
     file.seek(offset)
     return file.read(num_bytes)
 
-def bytes_to_int(x, endian):
+def bytes_to_int(x, endian): #Isn't there a builtin to do this...?
     if endian == 'little':
         return sum(c*256**i for i, c in enumerate(x))
     elif endian == 'big':
