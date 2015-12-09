@@ -43,21 +43,24 @@ class Image_Data_Pipeline:
         num_buffers=10,
         buffer_shape=(60, 256, 512),
         camera_child_process='dummy',
+        max_pix_per_image=3000*3000,
         ):
         """
-        Allocate a bunch of 16-bit buffers for image data, and a few
-        8-bit buffers for display data.
+        Allocate a bunch of 16-bit buffers for image data
         """
-        self.buffer_shape = buffer_shape
-        self.buffer_size = int(np.prod(buffer_shape))
+        self.buffer_shape = buffer_shape #Buffer shape can change later
+        self.buffer_size = int(np.prod(buffer_shape)) #This won't change
         self.num_data_buffers = num_buffers        
         self.data_buffers = [mp.Array(C.c_uint16, self.buffer_size)
                              for _ in range(self.num_data_buffers)]
         self.idle_data_buffers = range(self.num_data_buffers)
         self.accumulation_buffers = [mp.Array(C.c_uint16, self.buffer_size)
                                      for _ in range(2)]
-        projection_buffer_size = int(np.prod(buffer_shape[1:]))
-        self.projection_buffers = [mp.Array(C.c_uint16, projection_buffer_size)
+        """
+        We over-allocate our 2D projection buffers, for safety.
+        """
+        self._max_pix_per_image = max_pix_per_image
+        self.projection_buffers = [mp.Array(C.c_uint16, self._max_pix_per_image)
                                    for _ in range(2)]
         """
         Launch the child processes that make up the pipeline
@@ -94,6 +97,86 @@ class Image_Data_Pipeline:
                 self.projection.projection_buffer_output_queue),
             projection_buffer_output_queue=(
                 self.projection.projection_buffer_input_queue))
+        return None
+
+    def apply_camera_settings(
+        self,
+        trigger=None,
+        exposure_time_microseconds=None,
+        region_of_interest=None,
+        frames_per_buffer=None,
+        ):
+        """
+        All the child processes need to know if the camera ROI changes,
+        so this is a method of the Image_Data_Pipeline object instead of
+        the Data_Pipeline_Camera object.
+        
+        First, collect all the permission slips:
+        """
+####        
+##
+##
+##
+##        #FIXME Collect all permission slips
+##
+##
+####
+        """
+        Unspecified settings should remain unchanged:
+        """
+        if trigger is None:
+            trigger = self.camera.get_setting('trigger_mode')
+        if exposure_time_microseconds is None:
+            exposure_time_microseconds = self.camera.get_setting(
+                'exposure_time_microseconds')
+        if region_of_interest is None:
+            region_of_interest = camera.get_setting('roi')
+        if frames_per_buffer is None:
+            frames_per_buffer = self.buffer_shape[0]
+        """
+        If we're running the dummy camera, just leave Britney alone:
+        """
+        if (trigger == "unrecognized_command" or
+            exposure_time_microseconds == "unrecognized_command" or
+            region_of_interest == "unrecognized_command"):
+            return None #Dummy camera, bail out
+        """
+        We don't know yet if the camera will cooperate with our desired ROI:
+        """
+        self.camera.commands.send(
+            ('apply_settings',
+             {'trigger': trigger,
+              'exposure_time_microseconds': exposure_time_microseconds,
+              'region_of_interest': region_of_interest}))
+        response = self.camera.commands.recv()
+        assert response == None
+        new_roi = self.camera.get_setting('roi')
+        """
+        The new buffer shape must fit into the old buffer size. If it
+        doesn't, just crash; you should make a new Image_Data_Pipeline
+        object anyway, if you need the buffers to outgrow their britches.
+        """
+        new_buffer_shape = (frames_per_buffer,
+                            new_roi['bottom'] - new_roi['top'] + 1,
+                            new_roi['right'] - new_roi['left'] + 1)
+        new_buffer_size = np.prod(new_buffer_shape)
+        assert new_buffer_size <= self.buffer_size
+        assert np.prod(new_buffer_shape[1:]) <= self._max_pix_per_image
+        self.buffer_shape = new_buffer_shape
+        """
+        Now, tell the kids about the new buffer shape:
+        """
+        cmd = ('set_buffer_shape', {'shape': new_buffer_shape})
+        self.camera.commands.send(cmd)
+        self.accumulation.commands.send(cmd)
+        self.projection.commands.send(cmd)
+        self.display.commands.send(cmd)
+        self.file_saving.commands.send(cmd)
+        self.camera.commands.recv()
+        self.accumulation.commands.recv()
+        self.projection.commands.recv()
+        self.display.commands.recv()
+        self.file_saving.commands.recv()
         return None
     
 ##    def load_data_buffers(
@@ -144,36 +227,6 @@ class Image_Data_Pipeline:
 ##            self.idle_data_buffers.append(strip_me['which_buffer'])
 ##            info("Buffer %i idle"%(self.idle_data_buffers[-1]))
 ##        return None
-##    
-##    def set_buffer_shape(self, buffer_shape):
-##        """
-##        You don't have to use the whole buffer! If you want to make a
-##        buffer with more pixels than the original one, though, you
-##        should make a new Image_Data_Pipeline.
-##        """
-##        assert len(buffer_shape) == 3
-##        for s in buffer_shape:
-##            assert s > 0
-##        if np.prod(buffer_shape) > self.buffer_size:
-##            raise UserWarning("If you want a buffer larger than the original" +
-##                              " buffer size, close this Image_Data_Pipeline" +
-##                              " and make a new one.")
-##        self.buffer_shape = buffer_shape
-##        while len(self.idle_data_buffers) < len(self.data_buffers):
-##            self.collect_data_buffers()
-##            sleep(0.01)
-##        for p in (self.camera,
-##                  self.accumulation,
-##                  self.file_saving,
-##                  self.projection,
-##                  self.display):
-##            p.commands.send(('set_buffer_shape', {'shape': buffer_shape}))
-##            while True:
-##                if p.commands.poll():
-##                    p.commands.recv()
-##                    break
-##        return None
-
 ##    def check_children(self):
 ##        return {'Camera': self.camera.child.is_alive(),
 ##                'Accumulation': self.accumulation.child.is_alive(),
@@ -226,6 +279,12 @@ class Data_Pipeline_Camera:
         self.child.start()
         return None
 
+    def get_setting(self, setting):
+        self.commands.send(
+            ('get_setting', {'setting': setting}))
+        response = self.commands.recv()
+        return response
+
 def dummy_camera_child_process(
     data_buffers,
     buffer_shape,
@@ -254,10 +313,13 @@ def dummy_camera_child_process(
         """
         if commands.poll():
             cmd, args = commands.recv()
-            commands.send(None)
             if cmd == 'set_buffer_shape':
                 buffer_shape = args['shape']
                 buffer_size = np.prod(buffer_shape)
+                commands.send(None)
+            else:
+                info("Unrecognized command: " + cmd)
+                commands.send("unrecognized_command")
             continue
         """
         The command pipe is empty; check the input queue for
@@ -345,32 +407,29 @@ def pco_edge_camera_child_process(
         if commands.poll():
             cmd, args = commands.recv()
             if cmd == 'apply_settings':
-                settings = camera.apply_settings(**args)
-                camera.arm()
-                commands.send(settings)
-##            if cmd == 'set_buffer_shape':
-##                buffer_shape = args['shape']
-##                buffer_size = np.prod(buffer_shape)
-##                commands.send(buffer_shape)
-##            elif cmd == 'get_settings':
-##                commands.send(camera.get_settings(**args))
-##            elif cmd == 'get_status':
-##                commands.send(status)
-##            elif cmd == 'reset_status':
-##                status = 'Normal'
-##                commands.send(None)
-##            elif cmd == 'get_preframes':
-##                commands.send(preframes)
-##            elif cmd == 'set_preframes':
-##                preframes = args['preframes']
-##                commands.send(preframes)
-##            elif cmd == 'get_timeout':
-##                commands.send(timeout)
-##            elif cmd == 'set_timeout':
-##                timeout = args['timeout']
-##                commands.send(timeout)
+                result = camera.apply_settings(**args)
+                camera.arm(num_buffers=3)
+                commands.send(result)
+            elif cmd == 'get_setting':
+                setting = getattr(camera, args['setting'])
+                commands.send(setting)
+            elif cmd == 'set_buffer_shape':
+                buffer_shape = args['shape']
+                buffer_size = np.prod(buffer_shape)
+                commands.send(buffer_shape)
+            elif cmd == 'get_status':
+                commands.send(status)
+            elif cmd == 'reset_status':
+                status = 'Normal'
+                commands.send(status)
+            elif cmd == 'get_preframes':
+                commands.send(preframes)
+            elif cmd == 'set_preframes':
+                preframes = args['preframes']
+                commands.send(preframes)
             else:
-                info("Unrecognized command")
+                info("Unrecognized command: " + cmd)
+                commands.send("unrecognized_command")
                 continue
         try:
             permission_slip = input_queue.get_nowait()
@@ -829,14 +888,7 @@ class Display:
                     """Same place, same button"""
                     if clock() - self._last_mouse_release[-1] < 0.2:
                         """We got ourselves a double-click"""
-                        self.image_scale = self.default_image_scale
-                        self.image_x = 0
-                        self.image_y = 0
-                        w, h = self._get_screen_dimensions()
-                        edge_length = min(w//2, h)
-                        self.window.width = edge_length
-                        self.window.height = edge_length
-                        self.window.set_location(int((w * 0.95) // 2), h//20)
+                        self._reset_window_size_and_position()
         """
         We don't want 'escape' or 'quit' to quit the pyglet
         application, just withdraw it. The parent application should
@@ -862,31 +914,26 @@ class Display:
         if cmd == 'set_intensity_scaling':
             response = self.set_intensity_scaling(**args)
             self.commands.send(response)
-##        elif cmd == 'set_buffer_shape':
-##            self.buffer_shape = args['shape']
-##            self.display_buffer_size = np.prod(self.buffer_shape[1:])
-##            if hasattr(self, 'display_data_16'):
-##                self.display_data_16 = self.display_data_16[
-##                    :self.buffer_shape[1],
-##                    :self.buffer_shape[2]]
-##            if hasattr(self, 'display_data_8'):
-##                self.display_data_8 = np.empty(self.buffer_shape[1:],
-##                                               dtype=np.uint8)
-##            np.take(self.lut, self.display_data_16, out=self.display_data_8)
-##            self.image = self._array_to_image(self.display_data_8,
-##                                             allow_copy=False)
-##            self.pyg.gl.glTexParameteri( #Reset to no interpolation
-##                self.pyg.gl.GL_TEXTURE_2D,
-##                self.pyg.gl.GL_TEXTURE_MAG_FILTER,
-##                self.pyg.gl.GL_NEAREST)
-##            self.window.set_size(self.image.width, self.image.height)
-##            self.commands.send(self.buffer_shape)
+        elif cmd == 'set_buffer_shape':
+            self.buffer_shape = args['shape']
+            self.projection_buffer_size = np.prod(self.buffer_shape[1:])
+            if hasattr(self, 'projection_data'): #FIXME? Fill with zeros?
+                self.projection_data = np.frombuffer(
+                    self.projection_buffers[
+                        self.current_projection_buffer].get_obj(),
+                    dtype=np.uint16)[:self.projection_buffer_size
+                                     ].reshape(self.buffer_shape[1:])
+            if hasattr(self, 'display_data'):
+                self.display_data = np.empty(self.buffer_shape[1:],
+                                             dtype=np.uint8)
+            self.convert_to_8_bit()
+            self._reset_window_size_and_position()
+            self.commands.send(self.buffer_shape)
         elif cmd == 'withdraw':
             self.window.set_visible(False)
             self.commands.send(None)
-##        else:
-##            raise UserWarning("Command not recognized: %s, %s"%(
-##                repr(cmd), repr(args)))
+        else:
+            info("Command not recognized: " + cmd)
         return None
 
     def switch_buffers(self, switch_to_me):
@@ -999,6 +1046,17 @@ class Display:
         screen = disp.get_default_screen()
         return screen.width, screen.height
 
+    def _reset_window_size_and_position(self):
+        self.image_scale = self.default_image_scale
+        self.image_x = 0
+        self.image_y = 0
+        w, h = self._get_screen_dimensions()
+        edge_length = min(w//2, h)
+        self.window.width = edge_length
+        self.window.height = edge_length
+        self.window.set_location(int((w * 0.95) // 2), h//20)
+        return None
+    
     def _enforce_panning_limits(self):
         if self.image_x < (self.window.width -
                            self.image.width*self.image_scale):
@@ -1102,19 +1160,11 @@ if __name__ == '__main__':
 
     idp = Image_Data_Pipeline(
         num_buffers=5,
-        buffer_shape=(1, 250, 120),
+        buffer_shape=(200, 2048, 2060),
         camera_child_process='pco')
     idp.display.set_intensity_scaling('median_filter_autoscale')
     idp.display.withdraw()
-    idp.camera.commands.send(
-        ('apply_settings',
-         {'trigger': 'auto_trigger',
-          'region_of_interest': {'left': 481,
-                                 'right': 600,
-                                 'top': 900,
-                                 'bottom': 1149},
-          'exposure_time_microseconds': 10000}))
-    print(idp.camera.commands.recv())
+    idp.apply_camera_settings(region_of_interest={})
     num_slips = 0
     while True:
         try:
@@ -1122,16 +1172,27 @@ if __name__ == '__main__':
 ##            idp.collect_data_buffers()
 ##            idp.load_data_buffers(len(idp.idle_data_buffers))
             idp.camera.input_queue.put({'which_buffer': 0,
-##                                        'file_info': {'filename': 'test.tif'}
+##                                        'file_info': {'filename': 'test1.tif'}
                                         })
             idp.file_saving.output_queue.get()
             input()
             num_slips += 1
             if num_slips > 1:
                 idp.display.set_intensity_scaling(scaling='linear')
-####            idp.set_buffer_shape((idp.buffer_shape[0],
-####                                  idp.buffer_shape[1],
-####                                  idp.buffer_shape[2] - 10))
+            if num_slips == 2:
+                idp.apply_camera_settings(
+                    region_of_interest=
+                    {'left': 300,
+                     'right': 700},
+                    frames_per_buffer=3)
+                input()
+            if num_slips == 3:
+                idp.apply_camera_settings(
+                    region_of_interest=
+                    {'left': 200,
+                     'right': 800},
+                    frames_per_buffer=100)
+                input()
         except KeyboardInterrupt:
             break
 ##    idp.close()
