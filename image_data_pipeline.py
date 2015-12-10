@@ -411,7 +411,8 @@ def pco_edge_camera_child_process(
                 camera.arm(num_buffers=3)
                 commands.send(result)
             elif cmd == 'get_setting':
-                setting = getattr(camera, args['setting'])
+                setting = getattr(
+                    camera, args['setting'], 'unrecognized_setting')
                 commands.send(setting)
             elif cmd == 'set_buffer_shape':
                 buffer_shape = args['shape']
@@ -813,17 +814,15 @@ class Display:
 
     def make_window(self):
         screen_width, screen_height = self._get_screen_dimensions()
-        self.window = self.pyg.window.Window(
-            min(screen_width//2, screen_height),
-            min(screen_width//2, screen_height),
-            caption='Display',
-            resizable=True)
+        if not hasattr(self, 'window'):
+            self.window = self.pyg.window.Window(caption='Display',
+                                                 resizable=True)
+        self.window.set_size(min(screen_width//2, screen_height),
+                             min(screen_width//2, screen_height))
         self.window.set_location(int((screen_width * 0.95) // 2),
                                  screen_height//20)
-        self.default_image_scale = min(
-            (screen_width//2) / self.image.width,
-            screen_height / self.image.height)
-        self.image_scale = self.default_image_scale
+        self.image_scale = min(self.window.width / self.image.width,
+                               self.window.height / self.image.height)
         self.image_x, self.image_y = 0, 0
         @self.window.event
         def on_draw():
@@ -888,7 +887,7 @@ class Display:
                     """Same place, same button"""
                     if clock() - self._last_mouse_release[-1] < 0.2:
                         """We got ourselves a double-click"""
-                        self._reset_window_size_and_position()
+                        self.make_window()
         """
         We don't want 'escape' or 'quit' to quit the pyglet
         application, just withdraw it. The parent application should
@@ -927,7 +926,7 @@ class Display:
                 self.display_data = np.empty(self.buffer_shape[1:],
                                              dtype=np.uint8)
             self.convert_to_8_bit()
-            self._reset_window_size_and_position()
+            self.make_window()
             self.commands.send(self.buffer_shape)
         elif cmd == 'withdraw':
             self.window.set_visible(False)
@@ -1045,17 +1044,6 @@ class Display:
         disp = plat.get_default_display()
         screen = disp.get_default_screen()
         return screen.width, screen.height
-
-    def _reset_window_size_and_position(self):
-        self.image_scale = self.default_image_scale
-        self.image_x = 0
-        self.image_y = 0
-        w, h = self._get_screen_dimensions()
-        edge_length = min(w//2, h)
-        self.window.width = edge_length
-        self.window.height = edge_length
-        self.window.set_location(int((w * 0.95) // 2), h//20)
-        return None
     
     def _enforce_panning_limits(self):
         if self.image_x < (self.window.width -
