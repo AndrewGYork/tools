@@ -53,7 +53,7 @@ class Image_Data_Pipeline:
         self.num_data_buffers = num_buffers        
         self.data_buffers = [mp.Array(C.c_uint16, self.buffer_size)
                              for _ in range(self.num_data_buffers)]
-        self.idle_data_buffers = range(self.num_data_buffers)
+        self.idle_data_buffers = list(range(self.num_data_buffers))
         self.accumulation_buffers = [mp.Array(C.c_uint16, self.buffer_size)
                                      for _ in range(2)]
         """
@@ -113,14 +113,8 @@ class Image_Data_Pipeline:
         
         First, collect all the permission slips:
         """
-####        
-##
-##
-##
-##        #FIXME Collect all permission slips
-##
-##
-####
+        while len(self.idle_data_buffers) < self.num_data_buffers:
+            self.collect_permission_slips() #Hopefully non-infinite loop
         """
         Unspecified settings should remain unchanged:
         """
@@ -179,61 +173,87 @@ class Image_Data_Pipeline:
         self.file_saving.commands.recv()
         return None
     
-##    def load_data_buffers(
-##        self, N, file_saving_info=None, collect_buffers=True, timeout=0):
-##        """
-##        'file_saving_info' is None, or a list of dicts. Each dict is a
-##        set of arguments to simple_tif.array_to_tif().
-##        """
-##        if file_saving_info is not None:
-##            if len(file_saving_info) != N:
-##                raise UserWarning(
-##                    "If file saving info is provided, it must match the number" +
-##                    " of buffers loaded.")
-##        """
-##        Feed the pipe!
-##        """
-##        for i in range(N):
-##            """
-##            Get an idle buffer
-##            """
-##            for tries in range(10):
-##                try:
-##                    idle_buffer = self.idle_data_buffers.pop(0)
-##                    break
-##                except IndexError:
-##                    if collect_buffers:
-##                        if tries > 0:
-##                            sleep(timeout * 0.1)                            
-##                        self.collect_data_buffers()
-##            else:
-##                raise UserWarning("Timeout exceeded, no buffer available")
-##            """
-##            Load the buffer into the queue, along with file saving
-##            info if appropriate
-##            """
-##            permission_slip = {'which_buffer': idle_buffer}
-##            if file_saving_info is not None:
-##                permission_slip['file_info'] = file_saving_info.pop(0)
-##            self.camera.input_queue.put(permission_slip)
-##        return None
-##
-##    def collect_data_buffers(self):
-##        while True:
-##            try:
-##                strip_me = self.file_saving.output_queue.get_nowait()
-##            except Queue.Empty:
-##                break
-##            self.idle_data_buffers.append(strip_me['which_buffer'])
-##            info("Buffer %i idle"%(self.idle_data_buffers[-1]))
-##        return None
-##    def check_children(self):
-##        return {'Camera': self.camera.child.is_alive(),
-##                'Accumulation': self.accumulation.child.is_alive(),
-##                'File Saving': self.file_saving.child.is_alive(),
-##                'Projection': self.projection.child.is_alive(),
-##                'Display': self.display.child.is_alive()}
-##
+    def load_permission_slips(
+        self,
+        num_slips,
+        file_saving_info=None,
+        timeout=0,
+        ):
+        """
+        'num_slips' is the number of permission slips to load into the
+        image data pipeline.
+        'file_saving_info' is None, or a list of dicts. Each dict is a
+        set of arguments to np_tif.array_to_tif() that will get
+        associated with the corresponding permission slip.
+        'timeout' If we don't have enough slips to satisfy the request,
+        how long should we wait?
+        """
+        if file_saving_info is not None:
+            if len(file_saving_info) != num_slips:
+                raise UserWarning(
+                    "If file saving info is provided, it must match" +
+                    " the number of permission slips loaded.")
+        """
+        Feed the pipe!
+        """
+        start_time = clock()
+        for i in range(num_slips):
+            """
+            Try to get an idle buffer
+            """
+            while True:
+                try:
+                    idle_buffer = self.idle_data_buffers.pop(0)
+                    break
+                except IndexError:
+                    """
+                    If we've still got any time left, look for an idle buffer:
+                    """
+                    elapsed_time = clock() - start_time
+                    if elapsed_time < timeout:
+                        num_collected = self.collect_permission_slips()
+                        if num_collected == 0:
+                            """
+                            If you STILL don't have one, wait a minimal
+                            amount:
+                            """
+                            sleep(0.001)
+                    else:
+                        raise UserWarning(
+                            "No buffer available, timeout exceeded")
+            """
+            Construct a permission slip for the appropriate idle data
+            buffer, and load the permission slip into the queue, along
+            with file saving info if appropriate
+            """
+            permission_slip = {'which_buffer': idle_buffer}
+            if file_saving_info is not None:
+                permission_slip['file_info'] = file_saving_info.pop(0)
+            self.camera.input_queue.put(permission_slip)
+        return None
+
+    def collect_permission_slips(self):
+        num_collected = 0
+        while True:
+            try:
+                strip_me = self.file_saving.output_queue.get_nowait()
+            except Q.Empty:
+                break
+            num_collected += 1
+            self.idle_data_buffers.append(strip_me['which_buffer'])
+            info("Buffer %i idle"%(self.idle_data_buffers[-1]))
+        return num_collected
+    
+    def check_children(self):
+        """
+        It's good to periodically check if your children have died.
+        """
+        return {'Camera': self.camera.child.is_alive(),
+                'Accumulation': self.accumulation.child.is_alive(),
+                'File Saving': self.file_saving.child.is_alive(),
+                'Projection': self.projection.child.is_alive(),
+                'Display': self.display.child.is_alive()}
+
 ##    def close(self):
 ##        self.camera.input_queue.put(None)
 ##        self.accumulation.input_queue.put(None)
@@ -738,6 +758,12 @@ def display_child_process(
     intensity_min,
     intensity_max,
     ):
+    """
+    This child process is much more complicated than any of the other
+    ones. We're using a pyglet event loop instead of a "while" loop, and
+    we've got a reasonably complicated "Display" object to hold all this
+    logic.
+    """
     args = locals()
     display = Display(**args)
     display.run()
@@ -1156,13 +1182,9 @@ if __name__ == '__main__':
     num_slips = 0
     while True:
         try:
-##            print idp.check_children()
-##            idp.collect_data_buffers()
-##            idp.load_data_buffers(len(idp.idle_data_buffers))
-            idp.camera.input_queue.put({'which_buffer': 0,
-##                                        'file_info': {'filename': 'test1.tif'}
-                                        })
-            idp.file_saving.output_queue.get()
+            print(idp.check_children())
+            idp.collect_permission_slips()
+            idp.load_permission_slips(1)
             input()
             num_slips += 1
             if num_slips > 1:
