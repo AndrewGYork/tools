@@ -211,13 +211,11 @@ class Image_Data_Pipeline:
                     """
                     elapsed_time = clock() - start_time
                     if elapsed_time < timeout:
-                        num_collected = self.collect_permission_slips()
-                        if num_collected == 0:
-                            """
-                            If you STILL don't have one, wait a minimal
-                            amount:
-                            """
-                            sleep(0.001)
+                        self.collect_permission_slips()
+                        """
+                        This will loop pretty fast; waiting a long time
+                        for a buffer will use noticable CPU.
+                        """
                     else:
                         raise UserWarning(
                             "No buffer available, timeout exceeded")
@@ -254,19 +252,14 @@ class Image_Data_Pipeline:
                 'Projection': self.projection.child.is_alive(),
                 'Display': self.display.child.is_alive()}
 
-##    def close(self):
-##        self.camera.input_queue.put(None)
-##        self.accumulation.input_queue.put(None)
-##        self.file_saving.input_queue.put(None)
-##        self.projection.display_buffer_input_queue.put(None)
-##        self.projection.accumulation_buffer_input_queue.put(None)
-##        self.display.display_buffer_input_queue.put(None)
-##        self.camera.child.join()
-##        self.accumulation.child.join()
-##        self.file_saving.child.join()
-##        self.projection.child.join()
-##        self.display.child.join()
-##        return None
+    def close(self):
+        self.camera.input_queue.put(None)
+        self.camera.child.join()
+        self.accumulation.child.join()
+        self.file_saving.child.join()
+        self.projection.child.join()
+        self.display.child.join()
+        return None
 
 class Data_Pipeline_Camera:
     def __init__(
@@ -1181,28 +1174,27 @@ if __name__ == '__main__':
     idp.apply_camera_settings(region_of_interest={})
     num_slips = 0
     while True:
-        try:
-            print(idp.check_children())
-            idp.collect_permission_slips()
-            idp.load_permission_slips(1)
-            input()
-            num_slips += 1
-            if num_slips > 1:
-                idp.display.set_intensity_scaling(scaling='linear')
-            if num_slips == 2:
-                idp.apply_camera_settings(
-                    region_of_interest=
-                    {'left': 300,
-                     'right': 700},
-                    frames_per_buffer=3)
-                input()
-            if num_slips == 3:
-                idp.apply_camera_settings(
-                    region_of_interest=
-                    {'left': 200,
-                     'right': 800},
-                    frames_per_buffer=100)
-                input()
-        except KeyboardInterrupt:
+        print(idp.check_children())
+        idp.collect_permission_slips()
+        idp.load_permission_slips(1, timeout=2)
+        cmd = input()
+        if cmd == 'c':
             break
-##    idp.close()
+        num_slips += 1
+        if num_slips > 1:
+            idp.display.set_intensity_scaling(scaling='linear')
+        if num_slips == 2:
+            idp.apply_camera_settings(
+                region_of_interest=
+                {'left': 300,
+                 'right': 700},
+                frames_per_buffer=3)
+            input()
+        if num_slips == 3:
+            idp.apply_camera_settings(
+                region_of_interest=
+                {'left': 200,
+                 'right': 800},
+                frames_per_buffer=100)
+            input()
+    idp.close()
