@@ -326,6 +326,7 @@ def dummy_camera_child_process(
         """
         if commands.poll():
             cmd, args = commands.recv()
+            info("Command received:" + cmd)
             if cmd == 'set_buffer_shape':
                 buffer_shape = args['shape']
                 buffer_size = np.prod(buffer_shape)
@@ -411,14 +412,17 @@ def pco_edge_camera_child_process(
         info("Failed to import pco.py; go get it from github:")
         info("https://github.com/AndrewGYork/tools/blob/master/pco.py")
         raise
-    camera = pco.Edge(pco_edge_type=pco_edge_type)
+    info("Initializing...")
+    camera = pco.Edge(pco_edge_type=pco_edge_type, verbose=False)
     camera.apply_settings(trigger='auto_trigger')
     camera.arm(num_buffers=3)
+    info("Done initializing")
     preframes = 3
     status = 'Normal'
     while True:
         if commands.poll():
             cmd, args = commands.recv()
+            info("Command received: " + cmd)
             if cmd == 'apply_settings':
                 result = camera.apply_settings(**args)
                 camera.arm(num_buffers=3)
@@ -459,12 +463,12 @@ def pco_edge_camera_child_process(
             """
             time_received = clock()
             process_me = permission_slip['which_buffer']
-            info("start buffer %i"%(process_me))
+            info("start buffer %i, acquiring %i frames and %i preframes"%(
+                process_me, buffer_shape[0], preframes))
             with data_buffers[process_me].get_lock():
                 a = np.frombuffer(data_buffers[process_me].get_obj(),
                                   dtype=np.uint16)[:buffer_size
                                                    ].reshape(buffer_shape)
-                info('Start acquiring...')
                 try:
                     camera.record_to_memory(
                         num_images=a.shape[0] + preframes,
@@ -480,9 +484,8 @@ def pco_edge_camera_child_process(
                     status = 'DMAError'
                 else:
                     status = 'Normal'
-                info('Done acquiring: %06f seconds elapsed'%(
-                    clock() - time_received))
-            info("end buffer %i"%(process_me))
+            info("end buffer %i, %06f seconds elapsed"%(
+                process_me, clock() - time_received))
             output_queue.put(permission_slip)
     camera.close()
     return None    
@@ -543,6 +546,7 @@ def accumulation_child_process(
     while True:
         if commands.poll():
             cmd, args = commands.recv()
+            info("Command received: " + cmd)
             if cmd == 'set_buffer_shape':
                 buffer_shape = args['shape']
                 buffer_size = np.prod(buffer_shape)
@@ -580,6 +584,7 @@ def accumulation_child_process(
             """
             process_me = permission_slip['which_buffer']
             info("start buffer %i"%(process_me))
+            time_received = clock()
             with data_buffers[process_me].get_lock():
                 data = np.frombuffer(
                     data_buffers[process_me].get_obj(),
@@ -596,7 +601,8 @@ def accumulation_child_process(
             accumulation_buffer_occupied = True
             num_accumulated += 1
             data_buffer_output_queue.put(permission_slip)
-            info("end buffer %i"%(process_me))
+            info("end buffer %i, elapsed time %0.5f seconds"%(
+                process_me, clock() - time_received))
     return None
 
 class Data_Pipeline_Projection:
@@ -658,8 +664,8 @@ def projection_child_process(
         """
         while True:
             if commands.poll():
-                info("Command received")
                 cmd, args = commands.recv()
+                info("Command received: " + cmd)
                 if cmd == 'set_buffer_shape':
                     buffer_shape = args['shape']
                     buffer_size = np.prod(buffer_shape)
@@ -682,6 +688,7 @@ def projection_child_process(
                 accumulation buffer into the projection buffer.
                 """
                 info("start accumulation buffer %i"%(project_me))
+                time_received = clock()
                 with accumulation_buffers[project_me].get_lock():
                     acc = np.frombuffer(
                         accumulation_buffers[project_me].get_obj(),
@@ -692,7 +699,8 @@ def projection_child_process(
                             dtype=np.uint16)[:projection_buffer_size
                                              ].reshape(buffer_shape[1:])
                         np.amax(acc, axis=0, out=proj) #Project to 2D
-                info("end accumulation buffer %i"%(project_me))
+                info("end accumulation buffer %i, elapsed time %06f"%(
+                    project_me, clock() - time_received))
                 accumulation_buffer_output_queue.put(project_me)
                 info("Returning projection buffer %i"%(fill_me))
                 projection_buffer_output_queue.put(fill_me)
@@ -723,7 +731,7 @@ class Data_Pipeline_Display:
                   ),
             name='Display')
         self.child.start()
-        self.set_intensity_scaling('linear')
+##        self.set_intensity_scaling('linear')
         return None
 
     def set_intensity_scaling(
@@ -737,6 +745,10 @@ class Data_Pipeline_Display:
         self.commands.send(('set_intensity_scaling', args))
         self.intensity_scaling = self.commands.recv()
         return self.intensity_scaling
+
+    def get_num_frames_displayed(self):
+        self.commands.send(('get_num_frames_displayed', {}))
+        return self.commands.recv()
 
     def withdraw(self):
         self.commands.send(('withdraw', {}))
@@ -804,8 +816,14 @@ class Display:
         self.projection_buffers[1].get_lock().acquire()
         self.current_projection_buffer = 1
         self.switch_buffers(0)
-        self.make_window()
-        update_interval_seconds = 0.025
+        self.num_frames_displayed = 0
+        self.pyg.clock.schedule_once(self.make_window, 0)#Wait for run()
+        """
+        FIXME?: potential race condition? I'm pretty sure I want
+        make_window() to execute before update(). Is there a way to
+        guarantee the pyglet scheduler does this?
+        """
+        update_interval_seconds = 0.010
         self.pyg.clock.schedule_interval(self.update, update_interval_seconds)
         return None
 
@@ -829,9 +847,10 @@ class Display:
             self.quit()
         else:
             self.switch_buffers(switch_to_me)
+            self.num_frames_displayed += 1
         return None
 
-    def make_window(self):
+    def make_window(self, dt=None):
         screen_width, screen_height = self._get_screen_dimensions()
         if not hasattr(self, 'window'):
             self.window = self.pyg.window.Window(caption='Display',
@@ -929,9 +948,12 @@ class Display:
         the tuple is a dict of arguments to the command.
         """
         cmd, args = self.commands.recv()
+        info("Command received: " + cmd)
         if cmd == 'set_intensity_scaling':
             response = self.set_intensity_scaling(**args)
             self.commands.send(response)
+        elif cmd == 'get_num_frames_displayed':
+            self.commands.send(self.num_frames_displayed)
         elif cmd == 'set_buffer_shape':
             self.buffer_shape = args['shape']
             self.projection_buffer_size = np.prod(self.buffer_shape[1:])
@@ -975,11 +997,14 @@ class Display:
             self.display_max = self.projection_data.max()
             self._make_lookup_table()
         elif self.intensity_scaling == 'median_filter_autoscale':
+            info("start median filter autoscale...")
+            start_time = clock()
             filtered_image = self._ndimage.filters.median_filter(
                 self.projection_data, size=3, output=self.median_filtered_image)
             self.display_min = self.median_filtered_image.min()
             self.display_max = self.median_filtered_image.max()
             self._make_lookup_table()
+            info("end median filter autoscale, elapsed time %06f seconds"%(clock() - start_time))
         self.convert_to_8_bit()
         return None
 
@@ -1121,6 +1146,7 @@ def file_saving_child_process(
     while True:
         if commands.poll():
             cmd, args = commands.recv()
+            info("Command received:" + cmd)
             if cmd == 'set_buffer_shape':
                 buffer_shape = args['shape']
                 buffer_size = np.prod(buffer_shape)
@@ -1137,6 +1163,7 @@ def file_saving_child_process(
         else:
             process_me = permission_slip['which_buffer']
             info("start buffer %i"%(process_me))
+            time_received = clock()
             if 'file_info' in permission_slip:
                 """
                 We only save the data buffer to a file if we have 'file
@@ -1155,7 +1182,8 @@ def file_saving_child_process(
                                       dtype=np.uint16)[:buffer_size
                                                        ].reshape(buffer_shape)
                     np_tif.array_to_tif(a, **file_info)
-            info("end buffer %i"%(process_me))
+            info("end buffer %i, elapsed time %06f"%(
+                process_me, clock() - time_received))
             output_queue.put(permission_slip)
     return None
 
@@ -1169,32 +1197,39 @@ if __name__ == '__main__':
         num_buffers=5,
         buffer_shape=(200, 2048, 2060),
         camera_child_process='pco')
-    idp.display.set_intensity_scaling('median_filter_autoscale')
     idp.display.withdraw()
-    idp.apply_camera_settings(region_of_interest={})
     num_slips = 0
     while True:
+##        cmd = input("Ready to take a picture; hit enter...")
+##        if cmd == 'c':
+##            break
         print(idp.check_children())
-        idp.collect_permission_slips()
         idp.load_permission_slips(1, timeout=2)
-        cmd = input()
-        if cmd == 'c':
-            break
         num_slips += 1
-        if num_slips > 1:
-            idp.display.set_intensity_scaling(scaling='linear')
-        if num_slips == 2:
+        if num_slips == 1:
+            info("Waiting for camera to catch up...")
+            idp.camera.get_setting('roi')
+            info("Camera caught up")
+            info("Waiting for display to catch up...")
+            while idp.display.get_num_frames_displayed() < 1:
+                sleep(0.4)
+            info("Display caught up")
+            idp.display.set_intensity_scaling('median_filter_autoscale')
+            idp.display.set_intensity_scaling('linear')
+        elif num_slips == 2:
             idp.apply_camera_settings(
                 region_of_interest=
-                {'left': 300,
-                 'right': 700},
+                {'left': -1,
+                 'right': 10000},
                 frames_per_buffer=3)
-            input()
-        if num_slips == 3:
+            input("ROI changed; hit enter...")
+        elif num_slips == 3:
             idp.apply_camera_settings(
                 region_of_interest=
-                {'left': 200,
-                 'right': 800},
-                frames_per_buffer=100)
-            input()
+                {'left': -1,
+                 'right': 10000,
+                 'top': -1,
+                 'bottom': 10000},
+                frames_per_buffer=10)
+            input("ROI changed; hit enter...")
     idp.close()
