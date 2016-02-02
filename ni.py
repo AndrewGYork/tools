@@ -1,6 +1,10 @@
 import ctypes as C
 import numpy as np
 """
+TODO: One way or another, make it harder to forget the daq.close()
+method, which can cause crazy voltages to persist. _del_? _enter_ and
+_exit_? Try to do it better than we are.
+
 Requires nicaiu.dll to be in the same directory, or located in the
 os.environ['PATH'] search path.
 
