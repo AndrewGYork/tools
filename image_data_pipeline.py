@@ -1,17 +1,20 @@
 import queue as Q
 import ctypes as C
 import multiprocessing as mp #Careful about importing! See comment below.
+import logging
 from time import sleep
 from time import perf_counter as clock
 import numpy as np
-"""
-import pco # The "Camera" child process may try to make this import
-import pyglet # The "Display" child process will try to make these imports
-from arrayimage import ArrayInterfaceImage
-from scipy import ndimage
-import np_tif # The "File Saving" child process will make this import
-"""
-
+#
+# Several imports are made by the child processes, and I list them here
+# to make it easier for folks who are used to glancing at the top of a
+# file and seeing a complete list of imports:
+#
+# import pco # The "Camera" child process may try to make this import
+# import pyglet # The "Display" child process will make these imports
+# from arrayimage import ArrayInterfaceImage
+# from scipy import ndimage # The "Display" child process attempts this import
+# import np_tif # The "File Saving" child process will make this import
 """
 Acquiring and displaying data from a camera is a common problem our lab
 has to solve. This module provides a common framework for parallel
@@ -33,6 +36,8 @@ For example, your executing code should live inside one of these:
 ...so that all the 'info' and 'debug' statments in
 image_data_pipeline.py will work right.
 """
+# Printing and multiprocessing interact in funny ways. This is supposed
+# to help:
 log = mp.get_logger()
 info = log.info #Like a 'high priority' print statement
 debug = log.debug #Like a 'low priority' print statement
@@ -105,7 +110,9 @@ class Image_Data_Pipeline:
         exposure_time_microseconds=None,
         region_of_interest=None,
         frames_per_buffer=None,
+        preframes=None,
         ):
+        info("Applying settings to camera")
         """
         All the child processes need to know if the camera ROI changes,
         so this is a method of the Image_Data_Pipeline object instead of
@@ -124,15 +131,19 @@ class Image_Data_Pipeline:
             exposure_time_microseconds = self.camera.get_setting(
                 'exposure_time_microseconds')
         if region_of_interest is None:
-            region_of_interest = camera.get_setting('roi')
+            region_of_interest = self.camera.get_setting('roi')
         if frames_per_buffer is None:
             frames_per_buffer = self.buffer_shape[0]
+        if preframes is None:
+            self.camera.send('get_preframes')
+            preframes = self.camera.recv()
         """
         If we're running the dummy camera, just leave Britney alone:
         """
         if (trigger == "unrecognized_command" or
             exposure_time_microseconds == "unrecognized_command" or
-            region_of_interest == "unrecognized_command"):
+            region_of_interest == "unrecognized_command" or
+            preframes == "unrecognized_command"):
             return None #Dummy camera, bail out
         """
         We don't know yet if the camera will cooperate with our desired ROI:
@@ -142,9 +153,15 @@ class Image_Data_Pipeline:
              {'trigger': trigger,
               'exposure_time_microseconds': exposure_time_microseconds,
               'region_of_interest': region_of_interest}))
-        response = self.camera.commands.recv()
-        assert response == None
+        assert self.camera.commands.recv() == None
         new_roi = self.camera.get_setting('roi')
+        info("Camera trigger set to: " + trigger)
+        info("Camera exposure time set to: " +
+             str(exposure_time_microseconds) + " us")
+        info("Camera ROI set to:" + str(new_roi))
+        self.camera.commands.send(('set_preframes', {'preframes': preframes}))
+        assert self.camera.commands.recv() == preframes
+        info("Camera preframes set to: " + str(preframes))
         """
         The new buffer shape must fit into the old buffer size. If it
         doesn't, just crash; you should make a new Image_Data_Pipeline
