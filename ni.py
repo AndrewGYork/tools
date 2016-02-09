@@ -197,11 +197,14 @@ if __name__ == '__main__':
     Test basic functionality of the DAQ object
     """
     daq = PCI_6733(rate=7e5, num_channels=2, verbose=True)
-    daq.play_voltages()
-    v = np.ones((1000, daq.num_channels))
-    v[8:, :] = 0.5
-    daq.play_voltages(v)
-    daq.verbose=False
-    for i in range(100000):
+    try:
         daq.play_voltages()
-    daq.close()
+        v = np.ones((1000, daq.num_channels))
+        v[8:, :] = 0.5
+        daq.play_voltages(v)
+        daq.verbose=False
+        for i in range(100000):
+            daq.play_voltages()
+    finally:
+        daq.verbose = True
+        daq.close()
