@@ -8,9 +8,9 @@ class MDT694B_piezo_controller:
         verbose=True
         ):
         self.verbose = verbose
+        if self.verbose: print("Opening piezo...", end='')
         self.port = serial.Serial(port=port_number, baudrate=115200)
         # Restore the piezo controller to default settings
-        if self.verbose: print("Opening piezo...", end='')
         self.port.write(b'restore\n')
         response = self.port.read(51)
         assert response == (
