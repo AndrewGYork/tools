@@ -50,6 +50,7 @@ class MDT694B_piezo_controller:
         return None
 
 if __name__ == '__main__':
+    # Simple test code to show that the piezo controller is working
     piezo = MDT694B_piezo_controller()
     for i in range(10):
         piezo.set_voltage(1)
