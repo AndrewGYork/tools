@@ -26,8 +26,9 @@ class MDT694B_piezo_controller:
                           b'vlimit?\n*[ 150]\r': 150,}
         assert response in limit_settings
         self.voltage_limit_setting = limit_settings[response]
-        if self.verbose: print(" Piezo voltage limit setting:",
-                               self.voltage_limit_setting)
+        if self.verbose:
+            print(" Piezo voltage limit setting:",
+                  self.voltage_limit_setting)
         return None
 
     def set_voltage(self, v):
