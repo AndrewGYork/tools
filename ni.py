@@ -70,9 +70,28 @@ class PCI_6733:
             print("DAQ card scan rate set to", self.rate, "points per second")
         return None
 
-    def play_voltages(self, voltages=None, force_final_zeros=True):
+    def play_voltages(
+        self,
+        voltages=None,
+        force_final_zeros=True,
+        block=True,
+        ):
         """
         If voltage is None, play the previously set voltage.
+        If 'force_final_zeros', the last entry of each channel of
+        'voltages' is set to zero.
+        If 'block', this function will not return until the voltages are
+        finished playing. Not performant, but easier to reason about.
+
+        NB: by default, play_voltages() blocks until the voltages finish
+        playing. This makes it harder to accidentally code yourself into
+        ugly race conditions, but it obviously makes it hard to do
+        anything else while the DAQ is playing voltages. Since we're
+        just issuing a DLL call, it's easy for play_voltages() to return
+        as soon as the voltage task has started playing. This is
+        probably what you want! But easier to write bugs with.
+        Regardless, if a previous voltage task is still playing, we have
+        to wait for it to finish before we can start the next one.
         """
         self._ensure_task_is_stopped()
         if voltages is not None:
@@ -92,6 +111,8 @@ class PCI_6733:
         if self.verbose: print("Playing DAQ voltages...")
         check(api.start_task(self.task_handle))
         self._task_running = True
+        if block:
+            self._ensure_task_is_stopped()
         return None
 
     def close(self):
