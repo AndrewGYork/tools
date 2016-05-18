@@ -37,7 +37,6 @@ class DMK_x3GP031:
         self.set_video_format(verbose=verbose)
         self.set_exposure(exposure_seconds=0.1, verbose=verbose)
         self.enable_trigger(False)
-        
         return None
 
     def set_video_format(self, video_format=b'Y16 (2592x1944)', verbose=True):
@@ -161,13 +160,19 @@ class DMK_x3GP031:
         timeout_milliseconds=None,
         verbose=True,
         output_array=None):
+        #
+        # TODO: Check for timeouts, and define a custom exception for
+        # timeout events.
+        #
         if filename is None and output_array is None:
-            print("When the camera snaps an image, where is the data going?")
-            print("Disk? (set 'filename')")
-            print("Memory? (set 'output_array')")
-            print("You didn't set either one. No good.")
+            print("***Camera snap error***")
+            print(" When the camera snaps an image, where is the data going?")
+            print(" Disk? (set 'filename' when you call the 'snap' method)")
+            print(" Memory? (set 'output_array' when you call",
+                  "the 'snap' method)")
+            print(" You didn't set either one. No good.")
             raise UserWarning("Where should the camera put the snapped image?")
-        if verbose: print(" Snapping:")
+        if verbose: print(" Snapping")
         # I believe this is true: If you want the fastest frame rate,
         # you should leave the camera in "live" mode and snap, snap,
         # snap. However, a camera in "live" mode will occasionally
@@ -178,7 +183,7 @@ class DMK_x3GP031:
         #
         # This code block tries to accept both behaviors:
         # 1.  If we're in live mode, just snap.
-        # 2.  If we're not in live mode, go live, snap, stop live.
+        # 2.  If we're not in live mode, start live, snap, stop live.
         if self.live:
             already_live = True
         else:
@@ -207,25 +212,27 @@ class DMK_x3GP031:
                 "We failed to import np_tif.py.\n" +
                 "This means we can't save camera images as TIFs.")
         assert filename.endswith('.tif')
+        image = self._snapped_image_as_numpy_array()
         if verbose:
-            print(" Saving a", image.shape, image.dtype, "image as",
-                  filename, "...", end='')
-        np_tif.array_to_tif(self._snapped_image_as_numpy_array(), filename)
-        if verbose: print("done")
+            print(" Saving a ", image.shape, ' ', image.dtype, " image as '",
+                  filename, "'...", sep='', end='')
+        np_tif.array_to_tif(image, filename)
+        if verbose: print(" done")
         return None
 
     def _copy_snapped_image_to_numpy_array(
-        self, output_array=None, verbose=True):
+        self, output_array, verbose=True):
         # Don't call this method directly; it should be a side effect of
         # calling the 'snap' method.
-        image = _snapped_image_as_numpy_array()
-        if output_array is None: # We have to allocate memory to hold the output
-            return image.copy()
-        else: # The user provided an array to copy the snapped image into
-            assert output_array.shape == image.shape
-            assert output_array.dtype == image.dtype
-            output_array[:] = image
-            return None
+        image = self._snapped_image_as_numpy_array()
+        assert output_array.shape == image.shape
+        assert output_array.dtype == image.dtype
+        if verbose:
+            print(" Copying a ", image.shape, ' ', image.dtype,
+                  " image to memory...", sep='', end='')
+        output_array[:] = image
+        if verbose: print("done.")
+        return None
 
     def _snapped_image_as_numpy_array(self):
         # Don't call this method directly; it should be a side effect of
@@ -242,13 +249,14 @@ class DMK_x3GP031:
     def enable_trigger(self, enable=True):
         # True to enable external triggering, False to disable.
         assert dll.is_trigger_available(self.handle) == 1
-        # EnableTrigger does NOT return dll.success when it succeeds,
-        # even though the documentation says it should:
-        print(dll.enable_trigger(self.handle, enable))
+        assert dll.enable_trigger(self.handle, enable) == dll.success
         return None
 
     def send_trigger(self):
         # Send a software trigger to fire the device when in triggered mode.
+        if not self.live:
+            raise UserWarning("You can't send a software trigger to the " +
+                              "camera, because the camera isn't in live mode.")
         assert dll.software_trigger(self.handle) == dll.success
         return None
 
@@ -258,13 +266,6 @@ class DMK_x3GP031:
         dll.release_grabber(self.handle)
         if verbose: print("Camera closed.")
         return None
-
-def main():
-    camera = DMK_x3GP031()
-    camera.set_video_format("Y16 (1024x768)")
-    camera.set_exposure(0.1)
-    camera.snap(filename='test.tif')
-    camera.close()
 
 # DLL management
 try: # Load the DLL
@@ -397,4 +398,26 @@ dll.software_trigger.restype = C.c_int
 assert dll.init(None) == dll.success 
 
 if __name__ == '__main__':
-    main()
+    import time
+    camera = DMK_x3GP031()
+    camera.set_video_format("Y16 (2592x1944)")
+    camera.set_exposure(0.01)
+    camera.enable_trigger(True)
+    camera.start_live()
+    print("Sending software trigger...")
+    camera.send_trigger()
+    camera.snap(filename='test.tif', timeout_milliseconds=3000)
+    camera.enable_trigger(False)
+    camera.stop_live()
+    image = np.zeros((camera.height, camera.width), dtype=np.uint16)
+    num_frames = 10
+    camera.start_live()
+    print("Testing frame rate...")
+    start = time.clock()
+    for i in range(num_frames):
+        camera.snap(output_array=image, verbose=False)
+    end = time.clock()
+    camera.stop_live()
+    print(num_frames / (end - start), "frames per second")
+    camera.close()
+
