@@ -300,6 +300,8 @@ class Data_Pipeline_Camera:
             camera_child_process = dummy_camera_child_process
         elif camera_child_process is 'pco':
             camera_child_process = pco_edge_camera_child_process
+        elif camera_child_process is 'theimagingsource':
+            camera_child_process = theimagingsource_DMK_camera_child_process
         self.child = mp.Process(
             target=camera_child_process,
             args=(data_buffers, buffer_shape,
@@ -505,8 +507,76 @@ def pco_edge_camera_child_process(
                 process_me, clock() - time_received))
             output_queue.put(permission_slip)
     camera.close()
-    return None    
-    
+    return None
+
+def theimagingsource_DMK_camera_child_process(
+    data_buffers,
+    buffer_shape,
+    input_queue,
+    output_queue,
+    commands):
+    """
+    For the DMK 33GP031 camera. Might work for the DMK 23GP031...
+    """
+    buffer_size = np.prod(buffer_shape)
+    try:
+        import theimagingsource
+    except ImportError:
+        info("Failed to import theimagingsource.py; go get it from github:")
+        info("https://github.com/AndrewGYork/tools/blob/master" +
+             "/theimagingsource.py")
+        raise
+    info("Initializing...")
+    camera = theimagingsource.DMK_x3GP031(verbose=False)
+    camera.enable_trigger(True)
+    camera.start_live(verbose=False)
+    info("Done initializing")
+    while True:
+        if commands.poll():
+            cmd, args = commands.recv()
+            info("Command received: " + cmd)
+            if cmd == 'set_exposure':
+                result = camera.set_exposure(**args)
+                commands.send(result)
+            elif cmd == 'get_setting':
+                setting = getattr(
+                    camera, args['setting'], 'unrecognized_setting')
+                commands.send(setting)
+            elif cmd == 'set_buffer_shape':
+                buffer_shape = args['shape']
+                buffer_size = np.prod(buffer_shape)
+                commands.send(buffer_shape)
+            else:
+                info("Unrecognized command: " + cmd)
+                commands.send("unrecognized_command")
+                continue
+        try:
+            permission_slip = input_queue.get_nowait()
+        except Q.Empty:
+            sleep(0.001) #Non-deterministic sleep time :(
+            continue
+        if permission_slip is None: #This is how we signal "shut down"
+            output_queue.put(permission_slip)
+            break #We're done
+        else:
+            """
+            Fill the data buffer with images from the camera
+            """
+            time_received = clock()
+            process_me = permission_slip['which_buffer']
+            info("start buffer %i, acquiring %i frames"%(
+                process_me, buffer_shape[0]))
+            with data_buffers[process_me].get_lock():
+                a = np.frombuffer(data_buffers[process_me].get_obj(),
+                                  dtype=np.uint16)[:buffer_size
+                                                   ].reshape(buffer_shape)
+                camera.send_trigger()
+                camera.snap(output_array=a[0, :, :], verbose=False)
+            info("end buffer %i, %06f seconds elapsed"%(
+                process_me, clock() - time_received))
+            output_queue.put(permission_slip)
+    camera.close()
+    return None
 
 class Data_Pipeline_Accumulation:
     def __init__(
@@ -1095,8 +1165,10 @@ class Display:
         np.clip(self._lut_start, self.display_min, self.display_max,
                 out=self._lut_intermediate)
         self._lut_intermediate -= self.display_min
-        self._lut_intermediate //= (
-            self.display_max - self.display_min + 1) / 256
+        np.floor_divide(self._lut_intermediate,
+                        (self.display_max - self.display_min + 1) / 256,
+                        out=self._lut_intermediate,
+                        casting='unsafe')
         self.lut[:] = self._lut_intermediate.view(np.uint8)[::2] #Too sneaky?
         return None
 
