@@ -395,7 +395,7 @@ dll.software_trigger.argtypes = [GrabberHandle]
 dll.software_trigger.restype = C.c_int
 
 # Initialize the DLL once per module import
-assert dll.init(None) == dll.success 
+assert dll.init(None) == dll.success
 
 if __name__ == '__main__':
     import time
