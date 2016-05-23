@@ -10,11 +10,12 @@ import numpy as np
 # to make it easier for folks who are used to glancing at the top of a
 # file and seeing a complete list of imports:
 #
-# import pco # The "Camera" child process may try to make this import
-# import pyglet # The "Display" child process will make these imports
+# import pco # The "Camera" child process might import this
+# import theimagingsource # The "Camera" child process might import this
+# import pyglet # The "Display" child process will import these
 # from arrayimage import ArrayInterfaceImage
 # from scipy import ndimage # The "Display" child process attempts this import
-# import np_tif # The "File Saving" child process will make this import
+# import np_tif # The "File Saving" child process will import this
 """
 Acquiring and displaying data from a camera is a common problem our lab
 has to solve. This module provides a common framework for parallel
@@ -50,9 +51,7 @@ class Image_Data_Pipeline:
         camera_child_process='dummy',
         max_pix_per_image=3000*3000,
         ):
-        """
-        Allocate a bunch of 16-bit buffers for image data
-        """
+        # Allocate a bunch of 16-bit buffers for image data
         self.buffer_shape = buffer_shape #Buffer shape can change later
         self.buffer_size = int(np.prod(buffer_shape)) #This won't change
         self.num_data_buffers = num_buffers        
@@ -61,15 +60,11 @@ class Image_Data_Pipeline:
         self.idle_data_buffers = list(range(self.num_data_buffers))
         self.accumulation_buffers = [mp.Array(C.c_uint16, self.buffer_size)
                                      for _ in range(2)]
-        """
-        We over-allocate our 2D projection buffers, for safety.
-        """
+        # We over-allocate our 2D projection buffers, for safety.
         self._max_pix_per_image = max_pix_per_image
         self.projection_buffers = [mp.Array(C.c_uint16, self._max_pix_per_image)
                                    for _ in range(2)]
-        """
-        Launch the child processes that make up the pipeline
-        """
+        # Launch the child processes that make up the pipeline
         self.camera = Data_Pipeline_Camera(
             data_buffers=self.data_buffers,
             buffer_shape=self.buffer_shape,
@@ -83,10 +78,9 @@ class Image_Data_Pipeline:
             data_buffers=self.data_buffers,
             buffer_shape=self.buffer_shape,
             input_queue=self.accumulation.output_queue)
-        """
-        These processes are downstream of the accumulation process, but
-        not in the same loop as the camera or file saving processes.
-        """
+        # These processes are downstream of the accumulation process,
+        # but not in the same loop as the camera or file saving
+        # processes.
         self.projection = Data_Pipeline_Projection(
             buffer_shape=self.buffer_shape,
             projection_buffers=self.projection_buffers,
@@ -117,14 +111,12 @@ class Image_Data_Pipeline:
         All the child processes need to know if the camera ROI changes,
         so this is a method of the Image_Data_Pipeline object instead of
         the Data_Pipeline_Camera object.
-        
-        First, collect all the permission slips:
         """
+        
+        # First, collect all the permission slips:
         while len(self.idle_data_buffers) < self.num_data_buffers:
             self.collect_permission_slips() #Hopefully non-infinite loop
-        """
-        Unspecified settings should remain unchanged:
-        """
+        # Unspecified settings should remain unchanged:
         if trigger is None:
             trigger = self.camera.get_setting('trigger_mode')
         if exposure_time_microseconds is None:
@@ -135,19 +127,15 @@ class Image_Data_Pipeline:
         if frames_per_buffer is None:
             frames_per_buffer = self.buffer_shape[0]
         if preframes is None:
-            self.camera.send('get_preframes')
-            preframes = self.camera.recv()
-        """
-        If we're running the dummy camera, just leave Britney alone:
-        """
+            self.camera.commands.send(('get_preframes', {}))
+            preframes = self.camera.commands.recv()
+        # If we're running the dummy camera, just leave Britney alone:
         if (trigger == "unrecognized_command" or
             exposure_time_microseconds == "unrecognized_command" or
             region_of_interest == "unrecognized_command" or
             preframes == "unrecognized_command"):
             return None #Dummy camera, bail out
-        """
-        We don't know yet if the camera will cooperate with our desired ROI:
-        """
+        # We don't know yet if the camera will cooperate with our desired ROI:
         self.camera.commands.send(
             ('apply_settings',
              {'trigger': trigger,
@@ -162,11 +150,10 @@ class Image_Data_Pipeline:
         self.camera.commands.send(('set_preframes', {'preframes': preframes}))
         assert self.camera.commands.recv() == preframes
         info("Camera preframes set to: " + str(preframes))
-        """
-        The new buffer shape must fit into the old buffer size. If it
-        doesn't, just crash; you should make a new Image_Data_Pipeline
-        object anyway, if you need the buffers to outgrow their britches.
-        """
+        # The new buffer shape must fit into the old buffer size. If it
+        # doesn't, just crash; you should make a new Image_Data_Pipeline
+        # object anyway, if you need the buffers to outgrow their
+        # britches.
         new_buffer_shape = (frames_per_buffer,
                             new_roi['bottom'] - new_roi['top'] + 1,
                             new_roi['right'] - new_roi['left'] + 1)
@@ -174,9 +161,7 @@ class Image_Data_Pipeline:
         assert new_buffer_size <= self.buffer_size
         assert np.prod(new_buffer_shape[1:]) <= self._max_pix_per_image
         self.buffer_shape = new_buffer_shape
-        """
-        Now, tell the kids about the new buffer shape:
-        """
+        # Now, tell the kids about the new buffer shape:
         cmd = ('set_buffer_shape', {'shape': new_buffer_shape})
         self.camera.commands.send(cmd)
         self.accumulation.commands.send(cmd)
@@ -298,10 +283,6 @@ class Data_Pipeline_Camera:
         self.commands, self.child_commands = mp.Pipe()
         if camera_child_process is 'dummy':
             camera_child_process = dummy_camera_child_process
-        elif camera_child_process is 'pco':
-            camera_child_process = pco_edge_camera_child_process
-        elif camera_child_process is 'theimagingsource':
-            camera_child_process = theimagingsource_DMK_camera_child_process
         self.child = mp.Process(
             target=camera_child_process,
             args=(data_buffers, buffer_shape,
@@ -410,174 +391,6 @@ def dummy_camera_child_process(
             sleep(0.010) #It'd be nice if this was 10 ms but it ain't
             info("end buffer %i"%(process_me))
             output_queue.put(permission_slip)
-    return None
-
-def pco_edge_camera_child_process(
-    data_buffers,
-    buffer_shape,
-    input_queue,
-    output_queue,
-    commands,
-    pco_edge_type='4.2' #Change this if you're using a 5.5
-    ):
-    """
-    For the pco.edge camera. Debugged for the 4.2, but might work for
-    the 5.5, with some TLC...
-    """
-    buffer_size = np.prod(buffer_shape)
-    try:
-        import pco
-    except ImportError:
-        info("Failed to import pco.py; go get it from github:")
-        info("https://github.com/AndrewGYork/tools/blob/master/pco.py")
-        raise
-    info("Initializing...")
-    camera = pco.Edge(pco_edge_type=pco_edge_type, verbose=False)
-    camera.apply_settings(trigger='auto_trigger')
-    camera.arm(num_buffers=3)
-    info("Done initializing")
-    preframes = 3
-    status = 'Normal'
-    while True:
-        if commands.poll():
-            cmd, args = commands.recv()
-            info("Command received: " + cmd)
-            if cmd == 'apply_settings':
-                result = camera.apply_settings(**args)
-                camera.arm(num_buffers=3)
-                commands.send(result)
-            elif cmd == 'get_setting':
-                setting = getattr(
-                    camera, args['setting'], 'unrecognized_setting')
-                commands.send(setting)
-            elif cmd == 'set_buffer_shape':
-                buffer_shape = args['shape']
-                buffer_size = np.prod(buffer_shape)
-                commands.send(buffer_shape)
-            elif cmd == 'get_status':
-                commands.send(status)
-            elif cmd == 'reset_status':
-                status = 'Normal'
-                commands.send(status)
-            elif cmd == 'get_preframes':
-                commands.send(preframes)
-            elif cmd == 'set_preframes':
-                preframes = args['preframes']
-                commands.send(preframes)
-            else:
-                info("Unrecognized command: " + cmd)
-                commands.send("unrecognized_command")
-                continue
-        try:
-            permission_slip = input_queue.get_nowait()
-        except Q.Empty:
-            sleep(0.001) #Non-deterministic sleep time :(
-            continue
-        if permission_slip is None: #This is how we signal "shut down"
-            output_queue.put(permission_slip)
-            break #We're done
-        else:
-            """
-            Fill the data buffer with images from the camera
-            """
-            time_received = clock()
-            process_me = permission_slip['which_buffer']
-            info("start buffer %i, acquiring %i frames and %i preframes"%(
-                process_me, buffer_shape[0], preframes))
-            with data_buffers[process_me].get_lock():
-                a = np.frombuffer(data_buffers[process_me].get_obj(),
-                                  dtype=np.uint16)[:buffer_size
-                                                   ].reshape(buffer_shape)
-                try:
-                    camera.record_to_memory(
-                        num_images=a.shape[0] + preframes,
-                        preframes=preframes,
-                        out=a)
-                except pco.TimeoutError as e:
-                    info('TimeoutError, %i acquired'%(e.num_acquired))
-                    status = 'TimeoutError'
-                    #FIXME: we can do better, probably. Keep trying?
-                    #Should we zero the remainder of 'a'?
-                except pco.DMAError:
-                    info('DMAError')
-                    status = 'DMAError'
-                else:
-                    status = 'Normal'
-            info("end buffer %i, %06f seconds elapsed"%(
-                process_me, clock() - time_received))
-            output_queue.put(permission_slip)
-    camera.close()
-    return None
-
-def theimagingsource_DMK_camera_child_process(
-    data_buffers,
-    buffer_shape,
-    input_queue,
-    output_queue,
-    commands):
-    """
-    For the DMK 33GP031 camera. Might work for the DMK 23GP031...
-    """
-    buffer_size = np.prod(buffer_shape)
-    try:
-        import theimagingsource
-    except ImportError:
-        info("Failed to import theimagingsource.py; go get it from github:")
-        info("https://github.com/AndrewGYork/tools/blob/master" +
-             "/theimagingsource.py")
-        raise
-    info("Initializing...")
-    camera = theimagingsource.DMK_x3GP031(verbose=False)
-    camera.set_exposure(0.01)
-    camera.enable_trigger(True)
-    camera.start_live(verbose=False)
-    info("Done initializing")
-    while True:
-        if commands.poll():
-            cmd, args = commands.recv()
-            info("Command received: " + cmd)
-            if cmd == 'set_exposure':
-                result = camera.set_exposure(**args)
-                commands.send(result)
-            elif cmd == 'get_setting':
-                setting = getattr(
-                    camera, args['setting'], 'unrecognized_setting')
-                commands.send(setting)
-            elif cmd == 'set_buffer_shape':
-                buffer_shape = args['shape']
-                buffer_size = np.prod(buffer_shape)
-                commands.send(buffer_shape)
-            else:
-                info("Unrecognized command: " + cmd)
-                commands.send("unrecognized_command")
-                continue
-        try:
-            permission_slip = input_queue.get_nowait()
-        except Q.Empty:
-            sleep(0.001) #Non-deterministic sleep time :(
-            continue
-        if permission_slip is None: #This is how we signal "shut down"
-            output_queue.put(permission_slip)
-            break #We're done
-        else:
-            """
-            Fill the data buffer with images from the camera
-            """
-            time_received = clock()
-            process_me = permission_slip['which_buffer']
-            info("start buffer %i, acquiring %i frames"%(
-                process_me, buffer_shape[0]))
-            with data_buffers[process_me].get_lock():
-                a = np.frombuffer(data_buffers[process_me].get_obj(),
-                                  dtype=np.uint16)[:buffer_size
-                                                   ].reshape(buffer_shape)
-                for i in range(a.shape[0]):
-                    camera.send_trigger()
-                    camera.snap(output_array=a[i, :, :], verbose=False)
-            info("end buffer %i, %06f seconds elapsed"%(
-                process_me, clock() - time_received))
-            output_queue.put(permission_slip)
-    camera.close()
     return None
 
 class Data_Pipeline_Accumulation:
