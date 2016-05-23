@@ -267,6 +267,102 @@ class DMK_x3GP031:
         if verbose: print("Camera closed.")
         return None
 
+def DMK_camera_child_process(
+    data_buffers,
+    buffer_shape,
+    input_queue,
+    output_queue,
+    commands):
+    """For use with image_data_pipeline.py
+
+    https://github.com/AndrewGYork/tools/blob/master/image_data_pipeline.py
+    Debugged for the DMK 33GP031 camera, but might work for the DMK
+    23GP031, with some TLC...
+    """
+    from image_data_pipeline import info, Q, sleep, clock
+    try:
+        import theimagingsource
+    except ImportError:
+        info("Failed to import theimagingsource.py; go get it from github:")
+        info("https://github.com/AndrewGYork/tools/blob/master" +
+             "/theimagingsource.py")
+        raise
+    buffer_size = np.prod(buffer_shape)
+    info("Initializing...")
+    camera = theimagingsource.DMK_x3GP031(verbose=False)
+    camera.enable_trigger(True)
+    trigger_mode = 'auto_trigger'
+    camera.start_live(verbose=False)
+    info("Done initializing")
+    while True:
+        if commands.poll():
+            cmd, args = commands.recv()
+            info("Command received: " + cmd)
+            if cmd == 'apply_settings':
+                camera.set_exposure(
+                    exposure_seconds=1e-6*args['exposure_time_microseconds'],
+                    verbose=False)
+                assert args['trigger'] in ('auto_trigger', 'external_trigger')
+                trigger_mode = args['trigger']
+                # Ignore the requested region of interest, for now.
+                commands.send(None)
+            elif cmd == 'get_setting':
+                if args['setting'] == 'trigger_mode':
+                    setting = trigger_mode
+                elif args['setting'] == 'exposure_time_microseconds':
+                    setting = camera.exposure_microseconds
+                elif args['setting'] == 'roi':
+                    setting = {'left': 1,
+                               'right': camera.width,
+                               'top': 1,
+                               'bottom': camera.height}
+                else:
+                    setting = getattr(camera, args['setting'],
+                                      'unrecognized_setting')
+                commands.send(setting)
+            elif cmd == 'set_buffer_shape':
+                buffer_shape = args['shape']
+                buffer_size = np.prod(buffer_shape)
+                commands.send(buffer_shape)
+            elif cmd == 'set_preframes':
+                assert args['preframes'] == 0
+                commands.send(0)
+            elif cmd == 'get_preframes':
+                commands.send(0)
+            else:
+                info("Unrecognized command: " + cmd)
+                commands.send("unrecognized_command")
+                continue
+        try:
+            permission_slip = input_queue.get_nowait()
+        except Q.Empty:
+            sleep(0.001) #Non-deterministic sleep time :(
+            continue
+        if permission_slip is None: #This is how we signal "shut down"
+            output_queue.put(permission_slip)
+            break #We're done
+        else:
+            """
+            Fill the data buffer with images from the camera
+            """
+            time_received = clock()
+            process_me = permission_slip['which_buffer']
+            info("start buffer %i, acquiring %i frames"%(
+                process_me, buffer_shape[0]))
+            with data_buffers[process_me].get_lock():
+                a = np.frombuffer(data_buffers[process_me].get_obj(),
+                                  dtype=np.uint16)[:buffer_size
+                                                   ].reshape(buffer_shape)
+                for i in range(a.shape[0]):
+                    if trigger_mode == 'auto_trigger':
+                        camera.send_trigger()
+                    camera.snap(output_array=a[i, :, :], verbose=False)
+            info("end buffer %i, %06f seconds elapsed"%(
+                process_me, clock() - time_received))
+            output_queue.put(permission_slip)
+    camera.close()
+    return None
+
 # DLL management
 try: # Load the DLL
     dll = C.windll.LoadLibrary('tisgrabber_x64')
