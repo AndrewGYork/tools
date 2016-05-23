@@ -655,6 +655,103 @@ class Edge:
         assert self._get_roi() == roi
         return self.roi
 
+def pco_edge_camera_child_process(
+    data_buffers,
+    buffer_shape,
+    input_queue,
+    output_queue,
+    commands,
+    pco_edge_type='4.2' #Change this if you're using a 5.5
+    ):
+    """For use with image_data_pipeline.py
+
+    https://github.com/AndrewGYork/tools/blob/master/image_data_pipeline.py
+    Debugged for the 4.2, but might work for the 5.5, with some TLC...
+    """
+    from image_data_pipeline import info, Q, sleep, clock
+    try:
+        import pco
+    except ImportError:
+        info("Failed to import pco.py; go get it from github:")
+        info("https://github.com/AndrewGYork/tools/blob/master/pco.py")
+        raise
+    buffer_size = np.prod(buffer_shape)
+    info("Initializing...")
+    camera = pco.Edge(pco_edge_type=pco_edge_type, verbose=False)
+    camera.apply_settings(trigger='auto_trigger')
+    camera.arm(num_buffers=3)
+    info("Done initializing")
+    preframes = 3
+    status = 'Normal'
+    while True:
+        if commands.poll():
+            cmd, args = commands.recv()
+            info("Command received: " + cmd)
+            if cmd == 'apply_settings':
+                result = camera.apply_settings(**args)
+                camera.arm(num_buffers=3)
+                commands.send(result)
+            elif cmd == 'get_setting':
+                setting = getattr(
+                    camera, args['setting'], 'unrecognized_setting')
+                commands.send(setting)
+            elif cmd == 'set_buffer_shape':
+                buffer_shape = args['shape']
+                buffer_size = np.prod(buffer_shape)
+                commands.send(buffer_shape)
+            elif cmd == 'get_status':
+                commands.send(status)
+            elif cmd == 'reset_status':
+                status = 'Normal'
+                commands.send(status)
+            elif cmd == 'get_preframes':
+                commands.send(preframes)
+            elif cmd == 'set_preframes':
+                preframes = args['preframes']
+                commands.send(preframes)
+            else:
+                info("Unrecognized command: " + cmd)
+                commands.send("unrecognized_command")
+                continue
+        try:
+            permission_slip = input_queue.get_nowait()
+        except Q.Empty:
+            sleep(0.001) #Non-deterministic sleep time :(
+            continue
+        if permission_slip is None: #This is how we signal "shut down"
+            output_queue.put(permission_slip)
+            break #We're done
+        else:
+            # Fill the data buffer with images from the camera
+            time_received = clock()
+            process_me = permission_slip['which_buffer']
+            info("start buffer %i, acquiring %i frames and %i preframes"%(
+                process_me, buffer_shape[0], preframes))
+            with data_buffers[process_me].get_lock():
+                a = np.frombuffer(data_buffers[process_me].get_obj(),
+                                  dtype=np.uint16)[:buffer_size
+                                                   ].reshape(buffer_shape)
+                try:
+                    camera.record_to_memory(
+                        num_images=a.shape[0] + preframes,
+                        preframes=preframes,
+                        out=a)
+                except pco.TimeoutError as e:
+                    info('TimeoutError, %i acquired'%(e.num_acquired))
+                    status = 'TimeoutError'
+                    #FIXME: we can do better, probably. Keep trying?
+                    #Should we zero the remainder of 'a'?
+                except pco.DMAError:
+                    info('DMAError')
+                    status = 'DMAError'
+                else:
+                    status = 'Normal'
+            info("end buffer %i, %06f seconds elapsed"%(
+                process_me, clock() - time_received))
+            output_queue.put(permission_slip)
+    camera.close()
+    return None
+
 """
 A few types of exception we'll use during recording:
 """
