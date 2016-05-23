@@ -528,6 +528,7 @@ def theimagingsource_DMK_camera_child_process(
         raise
     info("Initializing...")
     camera = theimagingsource.DMK_x3GP031(verbose=False)
+    camera.set_exposure(0.01)
     camera.enable_trigger(True)
     camera.start_live(verbose=False)
     info("Done initializing")
@@ -570,8 +571,9 @@ def theimagingsource_DMK_camera_child_process(
                 a = np.frombuffer(data_buffers[process_me].get_obj(),
                                   dtype=np.uint16)[:buffer_size
                                                    ].reshape(buffer_shape)
-                camera.send_trigger()
-                camera.snap(output_array=a[0, :, :], verbose=False)
+                for i in range(a.shape[0]):
+                    camera.send_trigger()
+                    camera.snap(output_array=a[i, :, :], verbose=False)
             info("end buffer %i, %06f seconds elapsed"%(
                 process_me, clock() - time_received))
             output_queue.put(permission_slip)
@@ -1086,8 +1088,10 @@ class Display:
         elif self.intensity_scaling == 'median_filter_autoscale':
             info("start median filter autoscale...")
             start_time = clock()
+            decimation = int(np.ceil(0.01 * min(self.projection_data.shape)))
             filtered_image = self._ndimage.filters.median_filter(
-                self.projection_data, size=3, output=self.median_filtered_image)
+                self.projection_data[::decimation, ::decimation], size=3,
+                output=self.median_filtered_image)
             self.display_min = self.median_filtered_image.min()
             self.display_max = self.median_filtered_image.max()
             self._make_lookup_table()
@@ -1135,11 +1139,14 @@ class Display:
             self.display_min = self.projection_data.min()
             self.display_max = self.projection_data.max()
         elif scaling == 'median_filter_autoscale':
+            decimation = int(np.ceil(0.01 * min(self.projection_data.shape)))
             if not hasattr(self, 'median_filtered_image'):
                 self.median_filtered_image = np.empty(
-                    self.buffer_shape[1:], dtype=np.uint16)
+                    self.projection_data[::decimation, ::decimation].shape,
+                    dtype=np.uint16)
             filtered_image = self._ndimage.filters.median_filter(
-                self.projection_data, size=3, output=self.median_filtered_image)
+                self.projection_data[::decimation, ::decimation],
+                size=3, output=self.median_filtered_image)
             self.display_min = self.median_filtered_image.min()
             self.display_max = self.median_filtered_image.max()
         else:
