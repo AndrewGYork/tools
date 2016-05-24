@@ -5,10 +5,12 @@ class Stage:
     """Zaber stage(s), attached through the (USB?) serial port."""
     def __init__(
         self,
-        port_name='COM3',
+        port_name, # For example, 'COM3' on Windows
         timeout=1,
         verbose=True,
         very_verbose=False):
+        """port_name: which serial port the stage is connected to, e.g. 'COM3'
+        """
         self.verbose = verbose
         self.very_verbose = very_verbose
         try:
@@ -26,15 +28,15 @@ class Stage:
             raise
         if self.verbose: print("Renumbering stages:")
         self.devices = self.renumber_all_devices()
+        self.pending_moves = [False for d in self.devices]
         if self.verbose:
             for d in self.devices:
                 print(' Axis:', d)
             print(' Done renumbering.')
         self.restore_settings()
-        self.pending_moves = [False for d in self.devices]
         self.default_speed = min([r['speed'] for r in self.get_target_speed()])
-        self.move_home()
         if verbose: print(" Default stage speed:", self.default_speed)
+        self.move_home()
 
     def send(self, instruction):
         """Send an instruction to the Zaber stage.
@@ -55,9 +57,8 @@ class Stage:
 
         There must be 6 bytes to receive (no error checking).
         """
-        try:
-            response = self.serial.read(6)
-        except TypeError:
+        response = self.serial.read(6)
+        if len(response) != 6:
             raise UserWarning(
                 "Zaber stage failed to respond. Is the timeout too short?\n" +
                 "Is the stage plugged in?")
@@ -69,6 +70,22 @@ class Stage:
         if self.very_verbose:
             print("Response from stage:\n", response)
         return response
+
+    def get_position(self, axis='all'):
+        if axis == 'all':
+            axis = 0
+            num_responses = len(self.devices)
+        else:
+            num_responses = 1
+        assert axis in range(len(self.devices) + 1)
+        self.send([axis, 60, 0, 0, 0, 0])
+        responses = []
+        for i in range(num_responses):
+            responses.append(self.receive(expected_command_ID=60))
+        axis_positions = {}
+        for r in responses:
+            axis_positions[r['device_number']] = r['data']
+        return axis_positions
 
     def move(self, distance, movetype='absolute', response=True, axis='all'):
         if self.verbose:
@@ -108,6 +125,8 @@ class Stage:
         return response
 
     def move_home(self, response=True):
+        if self.verbose: print("Moving stage(s) near home...")
+        self.move(100)
         if self.verbose: print("Moving stage(s) home.")
         assert self.pending_moves == [False for d in self.devices]
         self.send([0, 1, 0, 0, 0, 0])
@@ -116,14 +135,17 @@ class Stage:
             return self.finish_moving()
         return None
 
-    def restore_settings(self, response=True):
+    def restore_settings(self):
         if self.verbose: print("Restoring stage(s) to default settings.")
-        self.send([0, 36, 0, 0, 0, 0])
-        if response:
-            reply = [self.receive(expected_command_ID=36)
-                     for d in self.devices]
-            assert self.serial.inWaiting() == 0
-            return reply
+        assert self.pending_moves == [False for d in self.devices]
+        assert self.serial.inWaiting() == 0
+        self.send([0, 36, 0, 0, 0, 0]) # Restore to default settings
+        for d in self.devices:
+            self.receive(expected_command_ID=36)
+        self.send([0, 116, 1, 0, 0, 0]) # Disable manual move tracking
+        for d in self.devices:
+            self.receive(expected_command_ID=116)
+        assert self.serial.inWaiting() == 0
         return None
             
     def renumber_all_devices(self):
@@ -175,6 +197,7 @@ class Stage:
         return reply
 
     def close(self):
+        self.move_home()
         self.serial.close()
 
 def four_bytes_to_uint(x):
@@ -186,15 +209,19 @@ def uint_to_four_bytes(x):
     return [x >> i & 0xff for i in (0, 8, 16, 24)]
 
 if __name__ == '__main__':
-    my_stage = Stage(timeout=20, verbose=True, very_verbose=False)
+    my_stage = Stage(port_name='COM3', verbose=True, very_verbose=False)
     try:
         my_stage.move(0, movetype='absolute', axis='all')
         for i in range(len(my_stage.devices)):
             my_stage.move(70000, movetype='absolute', axis=i+1)
+            print("Stage postion:", my_stage.get_position())
             my_stage.move(0, movetype='absolute', axis=i+1)
+            print("Stage postion:", my_stage.get_position())
         my_stage.set_target_speed(my_stage.default_speed * 1.3)
         my_stage.move(70000, movetype='absolute', axis='all')
+        print("Stage postion:", my_stage.get_position())
         my_stage.move(0, movetype='absolute', axis='all')
+        print("Stage postion:", my_stage.get_position())
         my_stage.set_target_speed(my_stage.default_speed)
     finally:
         my_stage.close()
