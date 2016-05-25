@@ -195,9 +195,7 @@ class Image_Data_Pipeline:
                 raise UserWarning(
                     "If file saving info is provided, it must match" +
                     " the number of permission slips loaded.")
-        """
-        Feed the pipe!
-        """
+        # Feed the pipe!
         start_time = clock()
         for i in range(num_slips):
             """
@@ -214,18 +212,14 @@ class Image_Data_Pipeline:
                     elapsed_time = clock() - start_time
                     if elapsed_time < timeout:
                         self.collect_permission_slips()
-                        """
-                        This will loop pretty fast; waiting a long time
-                        for a buffer will use noticable CPU.
-                        """
+                        # This will loop pretty fast; waiting a long
+                        # time for a buffer will use noticable CPU.
                     else:
                         raise UserWarning(
                             "No buffer available, timeout exceeded")
-            """
-            Construct a permission slip for the appropriate idle data
-            buffer, and load the permission slip into the queue, along
-            with file saving info if appropriate
-            """
+            # Construct a permission slip for the appropriate idle data
+            # buffer, and load the permission slip into the queue, along
+            # with file saving info if appropriate
             permission_slip = {'which_buffer': idle_buffer}
             if file_saving_info is not None:
                 permission_slip['file_info'] = file_saving_info.pop(0)
@@ -321,9 +315,7 @@ def dummy_camera_child_process(
         d.fill(int((2**16 - 1) * (i + 1) / len(fake_data)))
     data_idx = -1
     while True:
-        """
-        Respond to commands until we've emptied the command pipe.
-        """
+        # Respond to commands until we've emptied the command pipe.
         if commands.poll():
             cmd, args = commands.recv()
             info("Command received:" + cmd)
@@ -335,59 +327,45 @@ def dummy_camera_child_process(
                 info("Unrecognized command: " + cmd)
                 commands.send("unrecognized_command")
             continue
-        """
-        The command pipe is empty; check the input queue for
-        permission slips.
-        """
+        # The command pipe is empty; check the input queue for
+        # permission slips.
         try:
             permission_slip = input_queue.get_nowait()
         except Q.Empty:
-            """
-            Nothing in the command pipe, nothing in the input queue.
-            Nothing to do! Start over, but after a small delay to
-            avoid burning too much CPU.
-            """
+            # Nothing in the command pipe, nothing in the input queue.
+            # Nothing to do! Start over, but after a small delay to
+            # avoid burning too much CPU.
             sleep(0.001) #Semi-random sleep time :(
             continue
-        """
-        The command pipe was empty, and we've got a permission slip.
-        Copy some fake data into the relevant data buffer to
-        simulate a camera.
-        """
+        # The command pipe was empty, and we've got a permission slip.
+        # Copy some fake data into the relevant data buffer to simulate
+        # a camera:
         if permission_slip is None: #This is how we signal "shut down"
             output_queue.put(permission_slip)
             break #We're done
         else:
-            """
-            The permission slip hopefully refers appropriately to a
-            data buffer. Fill that buffer with some fake data.
-            """
+            # The permission slip hopefully refers appropriately to a
+            # data buffer. Fill that buffer with some fake data.
             process_me = permission_slip['which_buffer']
             info("start buffer %i"%(process_me))
             with data_buffers[process_me].get_lock():
-                """
-                In this code block, we've locked the relevant
-                buffer, and we'll automatically release it when
-                we're done copying fake data into it.
-
-                This incantation lets us treat a multiprocessing
-                array like a numpy array:
-                """
+                # In this code block, we've locked the relevant buffer,
+                # and we'll automatically release it when we're done
+                # copying fake data into it.
+                #
+                # This incantation lets us treat a multiprocessing
+                # array like a numpy array:
                 a = np.frombuffer(data_buffers[process_me].get_obj(),
                                   dtype=np.uint16)[:buffer_size
                                                    ].reshape(buffer_shape)
-                """
-                Now we copy our fake data into the data buffer:
-                """
+                # Now we copy our fake data into the data buffer:
                 data_idx += 1
                 data_idx = data_idx % len(fake_data)
                 a[:, :, :] = fake_data[data_idx][:buffer_size
                                                  ].reshape(buffer_shape)
-            """
-            We're done copying fake data into the buffer. Wait a
-            silly amount of time (to act a little more like a real
-            camera), then pass the permission slip to the next guy:
-            """
+            # We're done copying fake data into the buffer. Wait a silly
+            # amount of time (to act a little more like a real camera),
+            # then pass the permission slip to the next guy:
             sleep(0.010) #It'd be nice if this was 10 ms but it ain't
             info("end buffer %i"%(process_me))
             output_queue.put(permission_slip)
@@ -477,13 +455,11 @@ def accumulation_child_process(
             accumulation_buffer_output_queue.put(None)
             break
         else:
-            """
-            The command pipe is empty, the data input queue was not. We
-            tried to get a fresh accumulation buffer; if we succceeded,
-            we'll copy our data buffer into it. If we failed, we'll
-            max-project our data buffer into the already-filled
-            accumulation buffer.
-            """
+            # The command pipe is empty, the data input queue was not.
+            # We tried to get a fresh accumulation buffer; if we
+            # succceeded, we'll copy our data buffer into it. If we
+            # failed, we'll max-project our data buffer into the
+            # already-filled accumulation buffer.
             process_me = permission_slip['which_buffer']
             info("start buffer %i"%(process_me))
             time_received = clock()
@@ -560,10 +536,8 @@ def projection_child_process(
             sleep(0.001) #Don't trust this to be 1 ms
             continue #Don't bother with other stuff!
         info("Display buffer %i received"%(fill_me))
-        """
-        Code below this point knows we have exactly one projection
-        buffer.
-        """
+        # Code below this point knows we have exactly one projection
+        # buffer.
         while True:
             if commands.poll():
                 cmd, args = commands.recv()
@@ -584,11 +558,9 @@ def projection_child_process(
                 alive = False #To break out of the while loop one level up
                 break
             else:
-                """
-                We've got a 3D accumulation buffer and a 2D projection
-                buffer, and the command pipe is empty. Project the
-                accumulation buffer into the projection buffer.
-                """
+                # We've got a 3D accumulation buffer and a 2D projection
+                # buffer, and the command pipe is empty. Project the
+                # accumulation buffer into the projection buffer.
                 info("start accumulation buffer %i"%(project_me))
                 time_received = clock()
                 with accumulation_buffers[project_me].get_lock():
@@ -633,7 +605,7 @@ class Data_Pipeline_Display:
                   ),
             name='Display')
         self.child.start()
-##        self.set_intensity_scaling('linear')
+        self.set_intensity_scaling('median_filter_autoscale')
         return None
 
     def set_intensity_scaling(
@@ -704,7 +676,6 @@ class Display:
             self._ndimage = ndimage
         except ImportError:
             self._ndimage = None
-
         self.projection_buffers = projection_buffers
         self.buffer_shape = buffer_shape
         self.projection_buffer_size = np.prod(buffer_shape[1:])
@@ -720,11 +691,9 @@ class Display:
         self.switch_buffers(0)
         self.num_frames_displayed = 0
         self.pyg.clock.schedule_once(self.make_window, 0)#Wait for run()
-        """
-        FIXME?: potential race condition? I'm pretty sure I want
-        make_window() to execute before update(). Is there a way to
-        guarantee the pyglet scheduler does this?
-        """
+        # FIXME?: potential race condition? I'm pretty sure I want
+        # make_window() to execute before update(). Is there a way to
+        # guarantee the pyglet scheduler does this?
         update_interval_seconds = 0.010
         self.pyg.clock.schedule_interval(self.update, update_interval_seconds)
         return None
@@ -764,6 +733,15 @@ class Display:
         self.image_scale = min(self.window.width / self.image.width,
                                self.window.height / self.image.height)
         self.image_x, self.image_y = 0, 0
+        self.mouse_hover_pixel_display = self.pyg.text.Label(
+            "",
+            font_name='Times New Roman',
+            font_size=14,
+            bold=True,
+            color=(255, 0, 0, 255),
+            x=int(0.87 * self.window.width), y=int(0.05 * self.window.height),
+            anchor_x='center', anchor_y='center')
+        self.mouse_hover_x, self.mouse_hover_y = -1, -1
         @self.window.event
         def on_draw():
             self.window.clear()
@@ -771,51 +749,62 @@ class Display:
                 x=self.image_x,
                 y=self.image_y,
                 height=int(self.image.height * self.image_scale),
-                width=int(self.image.width * self.image_scale),
-                )
-        """
-        Allow the user to pan and zoom the image
-        """
+                width=int(self.image.width * self.image_scale))
+            if (0 < self.mouse_hover_x < self.image.width and
+                0 < self.mouse_hover_y < self.image.height):
+                self.mouse_hover_pixel_display.text = "%i %i %i"%(
+                    self.mouse_hover_x, self.mouse_hover_y,
+                    self.projection_data[int(self.mouse_hover_y),
+                                         int(self.mouse_hover_x)])
+                self.mouse_hover_pixel_display.draw()
+        # Mouse hover displays the local coordinates and value
+        @self.window.event
+        def on_mouse_motion(x, y, dx, dy):
+            self.mouse_hover_x = (x - self.image_x) / self.image_scale
+            self.mouse_hover_y = (y - self.image_y) / self.image_scale
+        @self.window.event
+        def on_mouse_leave(x, y):
+            self.mouse_hover_x, self.mouse_hover_y = -1, -1
+        @self.window.event
+        def on_resize(width, height):
+            self.mouse_hover_pixel_display.x = int(
+                0.87 * width)
+            self.mouse_hover_pixel_display.y = int(
+                0.05 * height)
+        # Click and drag pans the image
         @self.window.event
         def on_mouse_drag(x, y, dx, dy, buttons, modifiers):
             if buttons == self.pyg.window.mouse.LEFT:
                 self.image_x += dx
                 self.image_y += dy
             self._enforce_panning_limits()
-
+        # Mouse wheel zooms the image
         @self.window.event
         def on_mouse_scroll(x, y, scroll_x, scroll_y):
             old_image_scale = self.image_scale
             self.image_scale *= 1.3**(scroll_y)
-            """
-            No sense letting the user make the image underfill the window
-            """
+            # No sense letting the user make the image underfill the window
             while (self.image.width * self.image_scale < self.window.width and
                    self.image.height * self.image_scale < self.window.height):
                 self.image_scale = min(
                     self.window.width / self.image.width,
                     self.window.height / self.image.height)
-            """
-            Might as well set some sane zoom limits, too.
-            """
+            # Might as well set some sane zoom limits, too.
             if self.image_scale < 0.01:
                 self.image_scale = 0.01
             if self.image_scale > 300:
                 self.image_scale = 300
-            """
-            Center the origin of the zoom on the mouse coordinate.
-            This was kinda thinky to figure out, don't fuck with this lightly.
-            """
+            # Center the origin of the zoom on the mouse coordinate.
+            # This was kinda thinky to figure out, don't fuck with this
+            # lightly.
             zoom = self.image_scale / old_image_scale
             self.image_x = self.image_x * zoom + x * (1 - zoom)
             self.image_y = self.image_y * zoom + y * (1 - zoom)
             self._enforce_panning_limits()
-        """
-        If the user double-clicks, reset to default zoom and
-        position. A nice way to reset if you get lost. Of course,
-        detecting double-clicks is not directly possible in
-        pyglet... http://stackoverflow.com/q/22968164
-        """
+        # If the user double-clicks, reset to default zoom and position.
+        # A nice way to reset if you get lost. Of course, detecting
+        # double-clicks is not directly possible in pyglet...
+        # http://stackoverflow.com/q/22968164
         @self.window.event
         def on_mouse_release(x, y, button, modifiers):
             self._last_mouse_release = (x, y, button, clock())
@@ -828,11 +817,9 @@ class Display:
                     if clock() - self._last_mouse_release[-1] < 0.2:
                         """We got ourselves a double-click"""
                         self.make_window()
-        """
-        We don't want 'escape' or 'quit' to quit the pyglet
-        application, just withdraw it. The parent application should
-        control when pyglet quits.
-        """
+        # We don't want 'escape' or 'quit' to quit the pyglet
+        # application, just withdraw it. The parent application should
+        # control when pyglet quits.
         @self.window.event
         def on_key_press(symbol, modifiers):
             if symbol == self.pyg.window.key.ESCAPE:
@@ -1074,17 +1061,13 @@ def file_saving_child_process(
             info("start buffer %i"%(process_me))
             time_received = clock()
             if 'file_info' in permission_slip:
-                """
-                We only save the data buffer to a file if we have 'file
-                information' in the permission slip. The value
-                associated with the 'file_info' key is a dict of
-                arguments to pass to np_tif.array_to_tif(), specifying
-                things like the file name.
-                """
+                # We only save the data buffer to a file if we have
+                # 'file information' in the permission slip. The value
+                # associated with the 'file_info' key is a dict of
+                # arguments to pass to np_tif.array_to_tif(), specifying
+                # things like the file name.
                 info("saving buffer %i"%(process_me))
-                """
-                Save the buffer to disk as a TIF
-                """
+                # Save the buffer to disk as a TIF
                 file_info = permission_slip['file_info']
                 with data_buffers[process_me].get_lock():
                     a = np.frombuffer(data_buffers[process_me].get_obj(),
