@@ -12,32 +12,41 @@ If you get an error, google for NIDAQmx.h to decypher it.
 """
 api = C.cdll.LoadLibrary("nicaiu")
 
-class PCI_6733:
+class Analog_Out:
     def __init__(
         self,
-        num_channels=8,
-        rate=1e5,
+        num_channels='all',
+        rate=1e4,
         verbose=True,
+        daq_type='6733',
+        board_name='Dev1' # Also popular: 'cDAQ1Mod1'
         ):
+        """Play analog voltages via a National Instruments analog-out DAQ board.
+
+        So far, I've only tested this for the PCI 6733 and the NI 9263.
         """
-        There's a half-decent chance this would work for other NI DAQ
-        cards, but I've only tested it for the PCI 6733.
-        """
-        assert 1 <= num_channels <= 8
+        assert daq_type in ('6733', '9263')
+        self.daq_type = daq_type
+        if self.daq_type == '6733':
+            self.max_channels = 8
+            self.max_rate = 1e6
+        elif self.daq_type == '9263':
+            self.max_channels = 4
+            self.max_rate = 1e5
+        if num_channels == 'all':
+            num_channels = self.max_channels
+        assert 1 <= num_channels <= self.max_channels
         self.num_channels = num_channels
         self.verbose = verbose
 
-        if self.verbose: print("Opening DAQ card...")
+        if self.verbose: print("Opening analog-out board...")
         self.task_handle = C.c_uint32(0)
         check(api.create_task(bytes(), self.task_handle))
-        """
-        If I were a real man, I would automatically detect the proper
-        board name somehow. Instead I just hard-code the one ours uses.
-        If this next api call crashes for you, check the name of your
-        analog-out card using NI Measurement and Automation Explorer (NI
-        MAX):
-        """
-        board_name = 'Dev1'
+        # If I were a real man, I would automatically detect the proper
+        # board name somehow, (DAQmxGetDevProductType?) instead of
+        # demanding user input via the 'init' argument. If this next api
+        # call crashes for you, check the name of your analog-out card
+        # using NI Measurement and Automation Explorer (NI MAX):
         device_name = bytes(board_name + "/ao0:%i"%(self.num_channels - 1),
                             'ascii')
         check(api.create_ao_voltage_channel(
@@ -48,7 +57,7 @@ class PCI_6733:
             +10.0, #Maximum voltage
             10348, #DAQmx_Val_Volts; don't question it!
             None)) #NULL
-        if self.verbose: print(" DAQ card open.")
+        if self.verbose: print(" AO board open.")
 
         self.voltages = np.zeros((2, num_channels), dtype=np.float64)
         self.set_rate(rate)
@@ -57,7 +66,7 @@ class PCI_6733:
 
     def set_rate(self, rate):
         self._ensure_task_is_stopped()
-        assert 0 < rate <= 1e6 #PCI 6733 can't go faster than 1 MS/s
+        assert 0 < rate <= self.max_rate
         self.rate = float(rate)
         check(api.clock_timing(
             self.task_handle,
@@ -67,7 +76,7 @@ class PCI_6733:
             10178, #DAQmx_Val_FiniteSamps (run once)
             self.voltages.shape[0]))
         if self.verbose:
-            print("DAQ card scan rate set to", self.rate, "points per second")
+            print("AO board scan rate set to", self.rate, "points per second")
         return None
 
     def play_voltages(
@@ -86,9 +95,9 @@ class PCI_6733:
         NB: by default, play_voltages() blocks until the voltages finish
         playing. This makes it harder to accidentally code yourself into
         ugly race conditions, but it obviously makes it hard to do
-        anything else while the DAQ is playing voltages. Since we're
-        just issuing a DLL call, it's easy for play_voltages() to return
-        as soon as the voltage task has started playing. This is
+        anything else while the AO board is playing voltages. Since
+        we're just issuing a DLL call, it's easy for play_voltages() to
+        return as soon as the voltage task has started playing. This is
         probably what you want! But easier to write bugs with.
         Regardless, if a previous voltage task is still playing, we have
         to wait for it to finish before we can start the next one.
@@ -101,14 +110,14 @@ class PCI_6733:
             assert voltages.shape[1] == self.num_channels
             if force_final_zeros:
                 if self.verbose:
-                    print("***Coercing DAQ voltages to end in zero!***")
+                    print("***Coercing AO voltages to end in zero!***")
                 voltages[-1, :] = 0
             old_voltages_shape = self.voltages.shape
             self.voltages = voltages
             if voltages.shape[0] != old_voltages_shape[0]:
                 self.set_rate(self.rate)
             self._write_voltages()
-        if self.verbose: print("Playing DAQ voltages...")
+        if self.verbose: print("Playing AO voltages...")
         check(api.start_task(self.task_handle))
         self._task_running = True
         if block:
@@ -117,18 +126,18 @@ class PCI_6733:
 
     def close(self):
         self._ensure_task_is_stopped()
-        if self.verbose: print("Closing DAQ...")
+        if self.verbose: print("Closing AO board...")
         check(api.clear_task(self.task_handle))
-        if self.verbose: print(" DAQ is closed.")
+        if self.verbose: print(" AO board is closed.")
         return None
 
     def _ensure_task_is_stopped(self):
         if not hasattr(self, '_task_running'):
             self._task_running = False
         if self._task_running:
-            if self.verbose: print("Waiting for DAQ to finish playing...")
+            if self.verbose: print("Waiting for AO board to finish playing...")
             check(api.finish_task(self.task_handle, -1))
-            if self.verbose: print(" DAQ is finished playing.")
+            if self.verbose: print(" AO board is finished playing.")
             check(api.stop_task(self.task_handle))
             self._task_running = False
         return None
@@ -147,14 +156,15 @@ class PCI_6733:
             None))
         if self.verbose:
             print(self.num_points_written.value,
-                  "points written to each DAQ channel.")
+                  "points written to each AO channel.")
         return None
 
-"""
-DLL api management, just sets a bunch of argtypes and renames the DLL
-functions to a pythonier style.
-"""
+PCI_6733 = Analog_Out # Backwards compatible
 
+# DLL api management
+#
+# Mostly just sets a bunch of argtypes and renames the DLL functions to
+# a pythonier style.
 api.get_error_info = api.DAQmxGetExtendedErrorInfo
 api.get_error_info.argtypes = [C.c_char_p, C.c_uint32]
 
@@ -214,14 +224,18 @@ def check(error_code):
             "NI DAQ error code: %i; see above for details."%(error_code))
 
 if __name__ == '__main__':
-    """
-    Test basic functionality of the DAQ object
-    """
-    daq = PCI_6733(rate=7e5, num_channels=2, verbose=True)
+    # Test basic functionality of the Analog_Out object
+    daq = Analog_Out(
+        rate=1e4,
+        num_channels=2,
+        verbose=True,
+        daq_type='9263',
+        board_name='cDAQ1Mod1')
     try:
         daq.play_voltages()
         v = np.ones((1000, daq.num_channels))
-        v[8:, :] = 0.5
+        v[:, :] = np.sin(np.linspace(0, np.pi, v.shape[0]
+                                     )).reshape(v.shape[0], 1)
         daq.play_voltages(v)
         daq.verbose=False
         for i in range(100000):
