@@ -43,10 +43,12 @@ class Analog_Out:
         self.task_handle = C.c_uint32(0)
         check(api.create_task(bytes(), self.task_handle))
         # If I were a real man, I would automatically detect the proper
-        # board name somehow, (DAQmxGetDevProductType?) instead of
-        # demanding user input via the 'init' argument. If this next api
-        # call crashes for you, check the name of your analog-out card
-        # using NI Measurement and Automation Explorer (NI MAX):
+        # board name somehow
+    # (http://digital.ni.com/public.nsf/allkb/86256F0E001DA9FF492572A5006FD7D3)
+        # instead of demanding user input via the 'init' argument. If
+        # this next api call crashes for you, check the name of your
+        # analog-out card using NI Measurement and Automation Explorer
+        # (NI MAX):
         device_name = bytes(board_name + "/ao0:%i"%(self.num_channels - 1),
                             'ascii')
         check(api.create_ao_voltage_channel(
