@@ -1,4 +1,5 @@
 import ctypes as C
+from time import perf_counter as clock
 import numpy as np
 try:
     import np_tif
@@ -192,7 +193,16 @@ class DMK_x3GP031:
         if timeout_milliseconds is None: # No timeout; wait forever
             timeout_milliseconds = -1
         timeout_milliseconds = int(timeout_milliseconds)
-        assert dll.snap_image(self.handle, timeout_milliseconds) == dll.success
+        start_time = clock()
+        result = dll.snap_image(self.handle, timeout_milliseconds)
+        if result != dll.success:
+            end_time = clock()
+            if end_time - start_time >= 0.95 * timeout_milliseconds *1e-3:
+                # We probably timed out. Assume we did, crash accordingly.
+                raise TimeoutError("Camera snap timed out.")
+            else:
+                # I guess we failed for some other reason? Weird.
+                raise SnapError("Camera snap operation failed.")
         # If we temporarily went live, set live back to "stop":
         if not already_live:
             self.stop_live(verbose=verbose)
@@ -248,12 +258,30 @@ class DMK_x3GP031:
 
     def enable_trigger(self, enable=True):
         # True to enable external triggering, False to disable.
+        #
+        # My best estimate so far is that the 23GP031 rolling time is
+        # 72.5 microseconds per line, and the delay between the trigger
+        # and the first line beginning exposure is 936 microseconds.
         assert dll.is_trigger_available(self.handle) == 1
         assert dll.enable_trigger(self.handle, enable) == dll.success
         return None
 
     def send_trigger(self):
-        # Send a software trigger to fire the device when in triggered mode.
+        # Send a software trigger to fire the device when in triggered
+        # mode.
+        #
+        # Be pretty damn careful with this, and don't expect predictable
+        # behavior. I don't understand exactly how software triggers
+        # work on DMK cameras. How long can you wait between a software
+        # trigger and a snap? Is this basically only intended for the
+        # case where you're using callbacks (which we don't support
+        # here yet, maybe never) instead of snaps?
+        #
+        # In my limited experience, the 33GP gets away with software
+        # triggering + snaps, and the 23GP doesn't.
+        if self.name.startswith(b"DMK 23GP031"):
+            raise UserWarning(
+                "Software triggering the DMK 23GP031 probably won't work.")
         if not self.live:
             raise UserWarning("You can't send a software trigger to the " +
                               "camera, because the camera isn't in live mode.")
@@ -356,12 +384,30 @@ def DMK_camera_child_process(
                 for i in range(a.shape[0]):
                     if trigger_mode == 'auto_trigger':
                         camera.send_trigger()
-                    camera.snap(output_array=a[i, :, :], verbose=False)
+                    try:
+                        camera.snap(
+                            output_array=a[i, :, :],
+                            verbose=False,
+                            timeout_milliseconds=max(
+                                1000,
+                                100 + camera.exposure_microseconds * 1e-3))
+                    except TimeoutError:
+                        info("Snap timed out. Zeroing the buffer.")
+                        a.fill(0)
+                    except theimagingsource.SnapError:
+                        info("Snap failed. Zeroing the buffer.")
+                        a.fill(0)
             info("end buffer %i, %06f seconds elapsed"%(
                 process_me, clock() - time_received))
             output_queue.put(permission_slip)
     camera.close()
     return None
+
+class SnapError(Exception):
+    def __init__(self, value):
+        self.value = value
+    def __str__(self):
+        return repr(self.value)
 
 # DLL management
 try: # Load the DLL
@@ -498,13 +544,15 @@ if __name__ == '__main__':
     camera = DMK_x3GP031()
     camera.set_video_format("Y16 (2592x1944)")
     camera.set_exposure(0.01)
-    camera.enable_trigger(True)
-    camera.start_live()
-    print("Sending software trigger...")
-    camera.send_trigger()
-    camera.snap(filename='test.tif', timeout_milliseconds=3000)
-    camera.enable_trigger(False)
-    camera.stop_live()
+    if camera.name.startswith(b"DMK 33"):
+        # Test software triggering, but only on the newer camera type
+        camera.enable_trigger(True)
+        camera.start_live()
+        print("Sending software trigger...")
+        camera.send_trigger()
+        camera.snap(filename='test.tif', timeout_milliseconds=3000)
+        camera.enable_trigger(False)
+        camera.stop_live()
     image = np.zeros((camera.height, camera.width), dtype=np.uint16)
     num_frames = 10
     camera.start_live()
