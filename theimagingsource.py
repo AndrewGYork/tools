@@ -8,6 +8,17 @@ except ImportError: # You won't be able to save as TIF
 
 class DMK_x3GP031:
     def __init__(self, verbose=True):
+        # According to the documentation, dll.init "must be called only
+        # once before any other functions in this library are called".
+        # In my experience, you can call it as many times as you'd like.
+        # So why not call it on import, rather than call it on class
+        # instantiation? What if we want to support multiple cameras
+        # some day? Well, as far as I can tell, calling dll.init also
+        # interferes with tkinter in some way I don't understand. WTF?
+        # Possibly because the DLL has functions that produce GUI
+        # windows. Anyhow, things seem to work better if I initialize
+        # here.
+        assert dll.init(None) == dll.success
         # Find the camera
         num_devices = dll.get_device_count()
         for d in range(num_devices):
@@ -535,9 +546,6 @@ dll.enable_trigger.restype = C.c_int
 dll.software_trigger = dll.IC_SoftwareTrigger
 dll.software_trigger.argtypes = [GrabberHandle]
 dll.software_trigger.restype = C.c_int
-
-# Initialize the DLL once per module import
-assert dll.init(None) == dll.success
 
 if __name__ == '__main__':
     import time
