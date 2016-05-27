@@ -19,16 +19,19 @@ class Scanner:
             num_buffers=1,
             buffer_shape=(1, 1944, 2592),
             camera_child_process=DMK_camera_child_process)
+        self.idp.display.withdraw() # To prevent focus-theft
         self.idp.apply_camera_settings(
             exposure_time_microseconds=exposure_time_seconds * 1e6,
             trigger='external_trigger')
+        self.idp.display.withdraw() # To prevent focus-theft
         # Analog-out card, to trigger the camera and the illumination:
         self.analog_out = ni.Analog_Out(
             num_channels='all',
             rate=1e5,
             daq_type='9263',
             board_name='cDAQ1Mod1')
-        self.create_voltages()
+        self.set_exposure_and_dose(dose_duration_488_seconds=1,
+                                   dose_duration_405_seconds=1)
         # XY stage, to scan multiple fields of view
         self.stage = zaber.Stage(port_name=zaber_stage_port_name, timeout=7)
         self.last_snap_x, self.last_snap_y = -1, -1
@@ -57,7 +60,7 @@ class Scanner:
             self.last_snap_y = y
             stage_moves = True
         if filename is not None:
-            file_saving_info = {'filename': filename}
+            file_saving_info = [{'filename': filename}]
         else:
             file_saving_info = None
         self.stage.finish_moving()
@@ -107,22 +110,34 @@ class Scanner:
             assert 0 < y < 303000
             self.stage.move(y, axis=1, response=False)
         self.stage.finish_moving()
-        self.analog_out.play_voltages(self.voltages[illumination])
+        if self.last_played_voltage == illumination:
+            v = None # No need to re-load the voltages
+        else:
+            v = self.voltages[illumination]
+            self.last_played_voltage = illumination
+        self.analog_out.play_voltages(v)
         return None
 
-    def set_exposure(self):
-        # TODO
-        pass
-
-    def set_dose_duration(self):
-        #TODO
-        pass
-
-    def create_voltages(
+    def set_exposure_and_dose(
         self,
-        dose_duration_488=1, # Seconds
-        dose_duration_405=1, # Seconds
+        exposure_time_seconds=None,
+        dose_duration_488_seconds=None,
+        dose_duration_405_seconds=None
         ):
+        assert (exposure_time_seconds is not None or
+                dose_duration_488_seconds is not None or
+                dose_duration_405_seconds is not None)
+        if exposure_time_seconds is not None:
+            self.idp.apply_camera_settings(
+                exposure_time_microseconds=exposure_time_seconds * 1e6)
+        if dose_duration_488_seconds is not None:
+            self.dose_duration_488_seconds = float(dose_duration_488_seconds)
+        if dose_duration_405_seconds is not None:
+            self.dose_duration_405_seconds = float(dose_duration_405_seconds)
+        self._create_voltages()
+        return None
+
+    def _create_voltages(self):
         """Define useful voltages that we expect to reuse frequently.
 
         Re-run this if you change the camera exposure time, or if you
@@ -135,7 +150,12 @@ class Scanner:
         rolling_time = seconds_per_line * num_lines
         exposure_time = (
             1e-6 * self.idp.camera.get_setting('exposure_time_microseconds'))
-        assert exposure_time > rolling_time
+        if exposure_time <= rolling_time:
+            print("Camera exposure time:", exposure_time, "seconds")
+            print("Camera rolling time:", rolling_time, "seconds")
+            raise UserWarning(
+                "Camera exposure time is too short for global operation" +
+                " with rolling shutter.")
         start_time = (seconds_from_trigger_to_exposure + rolling_time)
         stop_time = (seconds_from_trigger_to_exposure + exposure_time)
         start_pix = int(round(start_time * self.analog_out.rate))
@@ -151,11 +171,11 @@ class Scanner:
         voltages['snap_405'][start_pix:stop_pix, 2] = 4
         # Voltages for photoconversion, without imaging:
         voltages['dose_488'] = np.zeros(
-            (dose_duration_488 * self.analog_out.rate,
+            (self.dose_duration_488_seconds * self.analog_out.rate,
              self.analog_out.num_channels), dtype=np.float64)
         voltages['dose_488'][:-1, 1] = 4
         voltages['dose_405'] = np.zeros(
-            (dose_duration_405 * self.analog_out.rate,
+            (self.dose_duration_405_seconds * self.analog_out.rate,
              self.analog_out.num_channels), dtype=np.float64)
         voltages['dose_405'][:-1, 2] = 4
         self.voltages = voltages
@@ -172,11 +192,12 @@ if __name__ == '__main__':
     logger.setLevel(logging.INFO)
 
     scanner = Scanner(zaber_stage_port_name='COM3')
+
     try:
         for x in range(1, 100000, 1000):
             print("New x position:", x)
             for i in range(3):
-                scanner.snap('488', x=x, y=20000)
+                scanner.snap('488', x=x, y=20000, stage_cooldown_seconds=0.1)
 ##                input("Hit enter...")
     finally:
         scanner.close()
