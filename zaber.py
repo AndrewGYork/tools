@@ -88,6 +88,7 @@ class Stage:
         return axis_positions
 
     def move(self, distance, movetype='absolute', response=True, axis='all'):
+        distance = int(distance)
         if self.verbose:
             print("Moving axis: ", repr(axis),
                   " distance ", distance, " (", movetype, ")", sep='')
