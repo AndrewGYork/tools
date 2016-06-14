@@ -31,7 +31,11 @@ class Scanner:
             daq_type='9263',
             board_name='cDAQ1Mod1')
         self.set_exposure_and_dose(dose_duration_488_seconds=1,
-                                   dose_duration_405_seconds=1)
+                                   dose_duration_405_seconds=1,
+                                   snap_voltage_488=4,
+                                   snap_voltage_405=4,
+                                   dose_voltage_488=4,
+                                   dose_voltage_405=4)
         # XY stage, to scan multiple fields of view
         self.stage = zaber.Stage(port_name=zaber_stage_port_name, timeout=7)
         self.last_snap_x, self.last_snap_y = -1, -1
@@ -50,7 +54,7 @@ class Scanner:
         stage_start = time.perf_counter()
         stage_moves = False
         if x is not None and x != self.last_snap_x:
-            assert 0 < x < 200000
+            assert 0 < x < 303118
             self.stage.move(x, axis=2, response=False)
             self.last_snap_x = x
             stage_moves = True
@@ -122,11 +126,19 @@ class Scanner:
         self,
         exposure_time_seconds=None,
         dose_duration_488_seconds=None,
-        dose_duration_405_seconds=None
+        dose_duration_405_seconds=None,
+        snap_voltage_488=None,
+        snap_voltage_405=None,
+        dose_voltage_488=None,
+        dose_voltage_405=None,
         ):
         assert (exposure_time_seconds is not None or
                 dose_duration_488_seconds is not None or
-                dose_duration_405_seconds is not None)
+                dose_duration_405_seconds is not None or
+                snap_voltage_488 is not None or
+                snap_voltage_405 is not None or
+                dose_voltage_488 is not None or
+                dose_voltage_405 is not None)
         if exposure_time_seconds is not None:
             self.idp.apply_camera_settings(
                 exposure_time_microseconds=exposure_time_seconds * 1e6)
@@ -134,6 +146,18 @@ class Scanner:
             self.dose_duration_488_seconds = float(dose_duration_488_seconds)
         if dose_duration_405_seconds is not None:
             self.dose_duration_405_seconds = float(dose_duration_405_seconds)
+        if dose_voltage_488 is not None:
+            assert 0 < dose_voltage_488 < 5
+            self.dose_voltage_488 = float(dose_voltage_488)
+        if dose_voltage_405 is not None:
+            assert 0 < dose_voltage_405 < 5
+            self.dose_voltage_405 = float(dose_voltage_405)
+        if snap_voltage_488 is not None:
+            assert 0 < snap_voltage_488 < 5
+            self.snap_voltage_488 = float(snap_voltage_488)
+        if snap_voltage_405 is not None:
+            assert 0 < snap_voltage_405 < 5
+            self.snap_voltage_405 = float(snap_voltage_405)
         self._create_voltages()
         return None
 
@@ -167,17 +191,17 @@ class Scanner:
         for v in voltages.values():
             v[0:10, 0] = 4 # Camera trigger duration doesn't really matter
         # Add triggers for the LEDs:
-        voltages['snap_488'][start_pix:stop_pix, 1] = 4
-        voltages['snap_405'][start_pix:stop_pix, 2] = 4
+        voltages['snap_488'][start_pix:stop_pix, 1] = self.snap_voltage_488
+        voltages['snap_405'][start_pix:stop_pix, 2] = self.snap_voltage_405
         # Voltages for photoconversion, without imaging:
         voltages['dose_488'] = np.zeros(
             (self.dose_duration_488_seconds * self.analog_out.rate,
              self.analog_out.num_channels), dtype=np.float64)
-        voltages['dose_488'][:-1, 1] = 4
+        voltages['dose_488'][:-1, 1] = self.dose_voltage_488
         voltages['dose_405'] = np.zeros(
             (self.dose_duration_405_seconds * self.analog_out.rate,
              self.analog_out.num_channels), dtype=np.float64)
-        voltages['dose_405'][:-1, 2] = 4
+        voltages['dose_405'][:-1, 2] = self.dose_voltage_405
         self.voltages = voltages
         self.last_played_voltage = None
         return None
