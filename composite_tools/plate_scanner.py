@@ -184,6 +184,7 @@ class Scanner:
         stop_time = (seconds_from_trigger_to_exposure + exposure_time)
         start_pix = int(round(start_time * self.analog_out.rate))
         stop_pix = int(round(stop_time * self.analog_out.rate))
+        print("LED voltage is on from AO pixel", start_pix, "to", stop_pix)
         voltage_shape = (stop_pix+1, self.analog_out.num_channels)
         voltages = {t: np.zeros(voltage_shape, dtype=np.float64)
                     for t in ('snap_background', 'snap_488', 'snap_405')}
