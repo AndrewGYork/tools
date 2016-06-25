@@ -27,8 +27,8 @@ def stack_registration(
     'refinement' is one of 'integer', 'spike_interpolation', or
     'phase_fitting', in order of increasing precision/slowness. I don't
     yet have any evidence that my implementation of phase fitting gives
-    any improvement (faster, simpler) simple spike interpolation, so
-    caveat emptor.
+    any improvement over (faster, simpler) simple spike interpolation,
+    so caveat emptor.
 
     'register_in_place': If 'True', modify the input stack 's' by
     shifting its slices to line up with the reference slice.
@@ -36,7 +36,7 @@ def stack_registration(
     'registered_stack_is_masked': We mask each slice of the stack so
     that it goes to zero at the edges, which reduces Fourier artifacts
     and improves registration accuracy. If we're also modifying the
-    input stack, we can save one Fourier transform per iteration if
+    input stack, we can skip one Fourier transform per iteration if
     we're willing to substitute the 'masked' version of each slice for
     its original value.
 
