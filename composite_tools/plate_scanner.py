@@ -12,6 +12,7 @@ class Scanner:
         self,
         zaber_stage_port_name, # For example, 'COM3'
         exposure_time_seconds=0.2,
+        bin_size=None,
         ):
         # Image data pipeline, to get frames off the camera, display
         # them on-screen, and possibly save them to disk:
@@ -24,20 +25,24 @@ class Scanner:
             exposure_time_microseconds=exposure_time_seconds * 1e6,
             trigger='external_trigger')
         self.idp.display.withdraw() # To prevent focus-theft
+        self.idp.file_saving.commands.send(
+            ('set_bin_size', {'bin_size': bin_size}))
         # Analog-out card, to trigger the camera and the illumination:
         self.analog_out = ni.Analog_Out(
             num_channels='all',
             rate=1e5,
             daq_type='9263',
             board_name='cDAQ1Mod1')
-        self.set_exposure_and_dose(dose_duration_488_seconds=1,
-                                   dose_duration_405_seconds=1,
+        self.set_exposure_and_dose(dose_duration_488_seconds=5,
+                                   dose_duration_405_seconds=5,
                                    snap_voltage_488=4,
                                    snap_voltage_405=4,
                                    dose_voltage_488=4,
                                    dose_voltage_405=4)
         # XY stage, to scan multiple fields of view
         self.stage = zaber.Stage(port_name=zaber_stage_port_name, timeout=7)
+        self.stage.min_x, self.stage.min_y = 0, 0
+        self.stage.max_x, self.stage.max_y = 303118, 303118
         self.last_snap_x, self.last_snap_y = -1, -1
         return None
 
@@ -54,12 +59,12 @@ class Scanner:
         stage_start = time.perf_counter()
         stage_moves = False
         if x is not None and x != self.last_snap_x:
-            assert 0 < x < 303118
+            assert self.stage.min_x <= x <= self.stage.max_x
             self.stage.move(x, axis=2, response=False)
             self.last_snap_x = x
             stage_moves = True
         if y is not None and y != self.last_snap_y:
-            assert 0 < y < 303000
+            assert self.stage.min_y <= y <= self.stage.max_y
             self.stage.move(y, axis=1, response=False)
             self.last_snap_y = y
             stage_moves = True
@@ -108,10 +113,10 @@ class Scanner:
         assert illumination in ('488', '405')
         illumination = 'dose_' + illumination
         if x is not None:
-            assert 0 < x < 200000
+            assert self.stage.min_x <= x <= self.stage.max_x
             self.stage.move(x, axis=2, response=False)
         if y is not None:
-            assert 0 < y < 303000
+            assert self.stage.min_y <= y <= self.stage.max_y
             self.stage.move(y, axis=1, response=False)
         self.stage.finish_moving()
         if self.last_played_voltage == illumination:
@@ -182,10 +187,13 @@ class Scanner:
                 " with rolling shutter.")
         start_time = (seconds_from_trigger_to_exposure + rolling_time)
         stop_time = (seconds_from_trigger_to_exposure + exposure_time)
+        end_time = (seconds_from_trigger_to_exposure +
+                    rolling_time + exposure_time) # Camera must "unroll", too
         start_pix = int(round(start_time * self.analog_out.rate))
         stop_pix = int(round(stop_time * self.analog_out.rate))
+        end_pix = int(round(end_time * self.analog_out.rate))
         print("LED voltage is on from AO pixel", start_pix, "to", stop_pix)
-        voltage_shape = (stop_pix+1, self.analog_out.num_channels)
+        voltage_shape = (end_pix, self.analog_out.num_channels)
         voltages = {t: np.zeros(voltage_shape, dtype=np.float64)
                     for t in ('snap_background', 'snap_488', 'snap_405')}
         # Add triggers for the camera:
@@ -196,11 +204,11 @@ class Scanner:
         voltages['snap_405'][start_pix:stop_pix, 2] = self.snap_voltage_405
         # Voltages for photoconversion, without imaging:
         voltages['dose_488'] = np.zeros(
-            (self.dose_duration_488_seconds * self.analog_out.rate,
+            (self.dose_duration_488_seconds * self.analog_out.rate, #Autorounds
              self.analog_out.num_channels), dtype=np.float64)
         voltages['dose_488'][:-1, 1] = self.dose_voltage_488
         voltages['dose_405'] = np.zeros(
-            (self.dose_duration_405_seconds * self.analog_out.rate,
+            (self.dose_duration_405_seconds * self.analog_out.rate, #Autorounds
              self.analog_out.num_channels), dtype=np.float64)
         voltages['dose_405'][:-1, 2] = self.dose_voltage_405
         self.voltages = voltages
