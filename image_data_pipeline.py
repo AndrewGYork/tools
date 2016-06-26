@@ -1039,6 +1039,7 @@ def file_saving_child_process(
         info("https://github.com/AndrewGYork/tools/blob/master/np_tif.py")
         raise
     buffer_size = np.prod(buffer_shape)
+    bin_size = None
     while True:
         if commands.poll():
             cmd, args = commands.recv()
@@ -1047,6 +1048,12 @@ def file_saving_child_process(
                 buffer_shape = args['shape']
                 buffer_size = np.prod(buffer_shape)
                 commands.send(buffer_shape)
+            elif cmd == 'set_bin_size':
+                bin_size = args['bin_size']
+                if bin_size is not None:
+                    assert len(bin_size) == 3
+                    for b in bin_size: assert int(b) == b and b > 0
+                commands.send(bin_size)
             continue
         try:
             permission_slip = input_queue.get_nowait()
@@ -1073,11 +1080,23 @@ def file_saving_child_process(
                     a = np.frombuffer(data_buffers[process_me].get_obj(),
                                       dtype=np.uint16)[:buffer_size
                                                        ].reshape(buffer_shape)
-                    np_tif.array_to_tif(a, **file_info)
+                    if bin_size is None:
+                        b = a
+                    else: # Truncate the bin averages to the nearest int
+                        b = bucket(a, bucket_size=bin_size).astype(np.uint16)
+                    np_tif.array_to_tif(b, **file_info)
             info("end buffer %i, elapsed time %06f"%(
                 process_me, clock() - time_received))
             output_queue.put(permission_slip)
     return None
+
+def bucket(x, bucket_size):
+    x = np.ascontiguousarray(x)
+    new_shape = np.concatenate((np.array(x.shape) // bucket_size, bucket_size))
+    old_strides = np.array(x.strides)
+    new_strides = np.concatenate((old_strides * bucket_size, old_strides))
+    axis = tuple(range(x.ndim, 2*x.ndim))
+    return np.lib.stride_tricks.as_strided(x, new_shape, new_strides).mean(axis)
 
 if __name__ == '__main__':
     import multiprocessing as mp
