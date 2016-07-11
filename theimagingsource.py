@@ -172,10 +172,6 @@ class DMK_x3GP031:
         timeout_milliseconds=None,
         verbose=True,
         output_array=None):
-        #
-        # TODO: Check for timeouts, and define a custom exception for
-        # timeout events.
-        #
         if filename is None and output_array is None:
             print("***Camera snap error***")
             print(" When the camera snaps an image, where is the data going?")
@@ -208,7 +204,8 @@ class DMK_x3GP031:
         result = dll.snap_image(self.handle, timeout_milliseconds)
         if result != dll.success:
             end_time = clock()
-            if end_time - start_time >= 0.95 * timeout_milliseconds *1e-3:
+            if (end_time - start_time >= 0.95 * timeout_milliseconds *1e-3 and 
+                timeout_milliseconds >= 0):
                 # We probably timed out. Assume we did, crash accordingly.
                 raise TimeoutError("Camera snap timed out.")
             else:
