@@ -7,7 +7,7 @@ except ImportError: # You won't be able to save as TIF
     np_tif = None
 
 class DMK_x3GP031:
-    def __init__(self, verbose=True):
+    def __init__(self, verbose=True, serial_number=None):
         # According to the documentation, dll.init "must be called only
         # once before any other functions in this library are called".
         # In my experience, you can call it as many times as you'd like.
@@ -21,6 +21,9 @@ class DMK_x3GP031:
         assert dll.init(None) == dll.success
         # Find the camera
         num_devices = dll.get_device_count()
+        if num_devices > 1 and serial_number is None:
+            raise UserWarning(
+                "Multiple TIS cameras found. You must specify 'serial_number'")
         for d in range(num_devices):
             name = dll.get_unique_name_from_list(d)
             if len(name.split()) == 3:
@@ -28,10 +31,18 @@ class DMK_x3GP031:
                     if name.split()[1] in (b'33GP031', b'23GP031'): # It is!
                         if verbose:
                             print('Camera found, named:', name.decode('ascii'))
-                        break
+                        if serial_number is None:
+                            if verbose: print('Serial number not specified.')
+                            break
+                        if serial_number == int(name.split()[2]):
+                            if verbose: print('Serial number matches.')
+                            break
+                        else:
+                            if verbose: print('Serial number does not match')
         else:
             raise UserWarning("Failed to find a DMK *3GP031 camera.\n" +
-                              "Is the camera plugged in?")
+                              "Is the camera plugged in?" +
+                              " Is 'serial_number' correct?")
         self.name = name
         self.live = False
         # Take custody of the camera
@@ -546,7 +557,7 @@ dll.software_trigger.restype = C.c_int
 
 if __name__ == '__main__':
     import time
-    camera = DMK_x3GP031()
+    camera = DMK_x3GP031(serial_number=12614300)
     camera.set_video_format("Y16 (2592x1944)")
     camera.set_exposure(0.01)
     if camera.name.startswith(b"DMK 33"):
