@@ -22,7 +22,7 @@ class DMK_x3GP031:
         # Find the camera
         num_devices = dll.get_device_count()
         if num_devices > 1 and serial_number is None:
-            raise UserWarning(
+            raise SerialNumberError(
                 "Multiple TIS cameras found. You must specify 'serial_number'")
         for d in range(num_devices):
             name = dll.get_unique_name_from_list(d)
@@ -346,8 +346,15 @@ def DMK_camera_child_process(
         serial_number = int(open('tis_camera_serial_number.txt', 'rb').read())
     except FileNotFoundError:
         serial_number = None # This only works if there's only one TIS device
-    camera = theimagingsource.DMK_x3GP031(
-        verbose=False, serial_number=serial_number)
+    try:
+        camera = theimagingsource.DMK_x3GP031(
+            verbose=False, serial_number=serial_number)
+    except SerialNumberError:
+        info("\n\nThere are multiple TIS cameras to choose from. " +
+             "Which one should we use?\n\n" +
+             "\n\nSave a file called 'tis_camera_serial_number.txt' " +
+             "in the working directory,\ncontaining the serial number.\n\n")
+        raise SerialNumberError("Multiple TIS cameras, see text above")
     camera.enable_trigger(True)
     trigger_mode = 'auto_trigger'
     camera.start_live(verbose=False)
@@ -434,6 +441,12 @@ def DMK_camera_child_process(
     return None
 
 class SnapError(Exception):
+    def __init__(self, value):
+        self.value = value
+    def __str__(self):
+        return repr(self.value)
+
+class SerialNumberError(Exception):
     def __init__(self, value):
         self.value = value
     def __str__(self):
