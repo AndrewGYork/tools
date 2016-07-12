@@ -38,7 +38,9 @@ class DMK_x3GP031:
                             if verbose: print('Serial number matches.')
                             break
                         else:
-                            if verbose: print('Serial number does not match')
+                            if verbose:
+                                print('Serial number does not match',
+                                      serial_number)
         else:
             raise UserWarning("Failed to find a DMK *3GP031 camera.\n" +
                               "Is the camera plugged in?" +
@@ -336,7 +338,16 @@ def DMK_camera_child_process(
         raise
     buffer_size = np.prod(buffer_shape)
     info("Initializing...")
-    camera = theimagingsource.DMK_x3GP031(verbose=False)
+    # If you have multiple TIS cameras attached to the same computer, we
+    # need to know which one to use. You can save an appropriately named
+    # text file containing the serial number of the appropriate camera
+    # in the current working directory:
+    try:
+        serial_number = int(open('tis_camera_serial_number.txt', 'rb').read())
+    except FileNotFoundError:
+        serial_number = None # This only works if there's only one TIS device
+    camera = theimagingsource.DMK_x3GP031(
+        verbose=False, serial_number=serial_number)
     camera.enable_trigger(True)
     trigger_mode = 'auto_trigger'
     camera.start_live(verbose=False)
