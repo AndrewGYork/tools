@@ -51,6 +51,8 @@ class DMK_x3GP031:
         self.handle = dll.create_grabber()
         assert dll.open_by_name(self.handle, self.name) == dll.success
         assert dll.is_valid(self.handle) == dll.success
+        reset = dll.reset_properties(self.handle)
+        assert reset == dll.error # WTF, why doesn't this work?
         # Figure out what video formats (ROI and bit depth) are
         # supported, and set the format to our preferred default
         num_formats = dll.get_video_format_count(self.handle)
@@ -61,6 +63,7 @@ class DMK_x3GP031:
         assert b'Y16 (2592x1944)' in self.video_formats
         self.set_video_format(verbose=verbose)
         self.set_exposure(exposure_seconds=0.1, verbose=verbose)
+        self.set_gain(gain=4, verbose=verbose)
         self.enable_trigger(False)
         return None
 
@@ -69,7 +72,7 @@ class DMK_x3GP031:
             video_format = bytes(video_format)
         except TypeError: # ...or as an ascii string:
             video_format = bytes(video_format, encoding='ascii')
-        assert video_format.startswith(b"Y16") # Only 16-bit mode is supported
+        assert video_format.startswith(b"Y16") # We only support 16-bit mode
         if video_format not in self.video_formats: # Try to crash helpfully
             print("***Error: format not available***\n", "Available formats:")
             for fmt in self.video_formats:
@@ -163,6 +166,46 @@ class DMK_x3GP031:
         self.exposure_milliseconds = self.exposure_microseconds * 1e-3
         if verbose:
             print(" Camera exposure: %0.6f seconds"%self.exposure_seconds)
+        return None
+
+    def set_gain(self, gain, verbose=True):
+        # First we ensure autogain exists, and disabled
+        assert dll.can_video_property_be_auto(self.handle, dll.gain) == 1
+        autogain = C.c_int(777)
+        assert dll.get_auto_video_property(
+            self.handle, dll.gain, autogain) == dll.success
+        assert autogain.value in (0, 1)
+        if autogain.value == 1:
+            if verbose: print(" Deactivating autogain... ", end='')
+            assert dll.set_auto_video_property(
+                self.handle, dll.gain, 0) == dll.success
+            assert dll.get_auto_video_property(
+                self.handle, dll.gain, autogain) == dll.success
+            assert autogain.value == 0
+            if verbose: print("done.")
+        # Next find min and max allowed values for exposure    
+        min_gain, max_gain = C.c_long(777), C.c_long(778)
+        assert dll.get_video_property_range(
+            self.handle, dll.gain, min_gain, max_gain) == dll.success
+        # Check that the requested gain is allowed
+        gain = int(gain)
+        if not min_gain.value <= gain <= max_gain.value:
+            print("Minimum gain:", min_gain.value)
+            print("Maximum gain:", max_gain.value)
+            raise UserWarning("Requested gain is not possible")
+        # Now set the gain
+        assert dll.set_video_property(
+            self.handle, dll.gain, gain) == dll.success
+        self.get_gain(verbose=verbose)
+        return None
+
+    def get_gain(self, verbose=True):
+        gain = C.c_long(777)
+        assert dll.get_video_property(
+            self.handle, dll.gain, gain) == dll.success
+        self.gain = gain.value
+        if verbose:
+            print(" Camera gain:", self.gain)
         return None
 
     def start_live(self, verbose=True):
@@ -427,13 +470,13 @@ def DMK_camera_child_process(
                             verbose=False,
                             timeout_milliseconds=max(
                                 1000,
-                                100 + camera.exposure_microseconds * 1e-3))
+                                500 + camera.exposure_microseconds * 1e-3))
                     except TimeoutError:
                         info("Snap timed out. Zeroing the buffer.")
-                        a.fill(0)
+                        a[i, :, :].fill(0)
                     except theimagingsource.SnapError:
                         info("Snap failed. Zeroing the buffer.")
-                        a.fill(0)
+                        a[i, :, :].fill(0)
             info("end buffer %i, %06f seconds elapsed"%(
                 process_me, clock() - time_received))
             output_queue.put(permission_slip)
@@ -470,6 +513,7 @@ GrabberHandle = C.POINTER(GrabberHandle_t)
 dll.success = 1
 dll.error = 0
 dll.exposure = 4
+dll.gain = 9
 
 dll.init = dll.IC_InitLibrary
 dll.init.argtypes = [C.c_char_p]
@@ -494,6 +538,10 @@ dll.open_by_name.restype = C.c_int
 dll.is_valid = dll.IC_IsDevValid
 dll.is_valid.argtypes = [GrabberHandle]
 dll.is_valid.restype = C.c_int
+
+dll.reset_properties = dll.IC_ResetProperties
+dll.reset_properties.argtypes = [GrabberHandle]
+dll.reset_properties.restype = C.c_int
 
 dll.get_video_format_count = dll.IC_GetVideoFormatCount
 dll.get_video_format_count.argtypes = [GrabberHandle]
@@ -546,14 +594,6 @@ dll.release_grabber = dll.IC_ReleaseGrabber
 dll.release_grabber.argtypes = [C.POINTER(GrabberHandle)]
 dll.release_grabber.restype = None
 
-dll.get_property = dll.IC_GetCameraProperty
-dll.get_property.argtypes = [GrabberHandle, C.c_uint, C.POINTER(C.c_long)]
-dll.get_property.restype = C.c_int
-
-dll.set_property = dll.IC_SetCameraProperty
-dll.set_property.argtypes = [GrabberHandle, C.c_uint, C.c_long]
-dll.set_property.restype = C.c_int
-
 dll.get_auto_property = dll.IC_GetAutoCameraProperty
 dll.get_auto_property.argtypes = [GrabberHandle, C.c_int, C.POINTER(C.c_int)]
 dll.get_auto_property.restype = C.c_int
@@ -562,10 +602,49 @@ dll.set_auto_property = dll.IC_EnableAutoCameraProperty
 dll.set_auto_property.argtypes = [GrabberHandle, C.c_int, C.c_int]
 dll.set_auto_property.restype = C.c_int
 
+dll.get_property = dll.IC_GetCameraProperty
+dll.get_property.argtypes = [GrabberHandle, C.c_uint, C.POINTER(C.c_long)]
+dll.get_property.restype = C.c_int
+
 dll.get_property_range = dll.IC_CameraPropertyGetRange
 dll.get_property_range.argtypes = [
     GrabberHandle, C.c_uint, C.POINTER(C.c_long), C.POINTER(C.c_long)]
 dll.get_property_range.restype = C.c_int
+
+dll.set_property = dll.IC_SetCameraProperty
+dll.set_property.argtypes = [GrabberHandle, C.c_uint, C.c_long]
+dll.set_property.restype = C.c_int
+
+dll.can_video_property_be_auto = dll.IC_IsVideoPropertyAutoAvailable
+dll.can_video_property_be_auto.argtypes = [GrabberHandle, C.c_uint]
+dll.can_video_property_be_auto.restype = C.c_int
+
+dll.get_auto_video_property = dll.IC_GetAutoVideoProperty
+dll.get_auto_video_property.argtypes = [GrabberHandle,
+                                        C.c_int,
+                                        C.POINTER(C.c_int)]
+dll.get_auto_video_property.restype = C.c_uint
+
+dll.set_auto_video_property = dll.IC_EnableAutoVideoProperty
+dll.set_auto_video_property.argtypes = [GrabberHandle, C.c_int, C.c_int]
+dll.set_auto_video_property.restype = C.c_int
+
+dll.get_video_property = dll.IC_GetVideoProperty
+dll.get_video_property.argtypes = [GrabberHandle,
+                                   C.c_uint,
+                                   C.POINTER(C.c_long)]
+dll.get_video_property.restype = C.c_int
+
+dll.get_video_property_range = dll.IC_VideoPropertyGetRange
+dll.get_video_property_range.argtypes = [GrabberHandle,
+                                         C.c_uint,
+                                         C.POINTER(C.c_long),
+                                         C.POINTER(C.c_long)]
+dll.get_video_property_range.restype = C.c_int
+
+dll.set_video_property = dll.IC_SetVideoProperty
+dll.set_video_property.argtypes = [
+    GrabberHandle, C.c_uint, C.c_long]
 
 dll.is_trigger_available = dll.IC_IsTriggerAvailable
 dll.is_trigger_available.argtypes = [GrabberHandle]
@@ -604,4 +683,3 @@ if __name__ == '__main__':
     camera.stop_live()
     print(num_frames / (end - start), "frames per second")
     camera.close()
-
