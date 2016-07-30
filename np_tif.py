@@ -335,16 +335,13 @@ def interpret_ifd_entry(file, entry, endian, verbose):
     We still haven't converted the value from bytes yet, but at least we
     got the correct bytes that encode the value.
     """
-    if field_type in ('BYTE', 'SHORT', 'LONG'): #TODO: return this as a numpy array?
+    if field_type in ('BYTE', 'SHORT', 'LONG'):
         if num_values == 1:
             value = bytes_to_int(value, endian)
         else:
-            value_list = []
-            for n in range(num_values):
-                value_list.append(bytes_to_int(value[bytes_per_count * n:
-                                                     bytes_per_count *(n+1)],
-                                               endian))
-            value = value_list
+            typestr = ({'big': '<', 'little': '>'}[endian] +
+                       {'BYTE': 'u1','SHORT': 'u2', 'LONG': 'u4'}[field_type])
+            value = np.fromstring(value, dtype=np.dtype(typestr))
 ##    elif field_type == 'ASCII':
 ##        value = str(value, encoding='ascii')
     else:
