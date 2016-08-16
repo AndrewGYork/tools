@@ -139,6 +139,8 @@ def array_to_tif(
             dtype = np.dtype('int32')
         elif x.dtype == np.uint64:
             dtype = np.dtype('uint32')
+    elif x.dtype == np.bool: # Coorce boolean arrays to uint8
+        dtype = np.dtype('uint8')
     else:
         dtype = x.dtype
     ifd.set_dtype(dtype)
@@ -173,8 +175,8 @@ def array_to_tif(
         f.write(b'II*\x00\x08\x00\x00\x00') #Little tif, turn to page 8
         ifd.bytes.tofile(f)
         f.write(image_description)
-        if coerce_64bit_to_32bit and x.dtype in (np.float64, np.int64, np.uint64):
-            for z in range(x.shape[0]): #Convert one at a time to conserve memory
+        if dtype != x.dtype: # We have to coerce to a different dtype
+            for z in range(x.shape[0]): #Convert one at a time to save memory
                 x[z, :, :].astype(dtype).tofile(f)
         else:
             x.tofile(f)
