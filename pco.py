@@ -245,6 +245,8 @@ class Edge:
                 if self._driver_status.value == 0x0:
                     pass
                 elif self._driver_status.value == 0x80332028:
+                    # Zero the rest of the buffer
+                    out[max(0, first_frame + (which_im - preframes)):, :, :].fill(0)
                     raise DMAError('DMA error during record_to_memory')
                 else:
                     print("Driver status:", self._driver_status.value)
