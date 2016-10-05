@@ -163,6 +163,7 @@ class Edge:
         first_frame=0,
         poll_timeout=5e5,
         sleep_timeout=40,
+        first_trigger_timeout_seconds=0,
         ):
         if not self.armed: self.arm()
         """
@@ -235,6 +236,9 @@ class Edge:
                 """
                 if num_polls > poll_timeout or num_sleeps > sleep_timeout:
                     elapsed_time = time.perf_counter() - start_time
+                    if which_im == 0: # First image; maybe keep waiting...
+                        if elapsed_time < first_trigger_timeout_seconds:
+                            continue
                     raise TimeoutError(
                         "After %i polls,"%(num_polls) + 
                         " %i sleeps"%(num_sleeps) + 
@@ -684,6 +688,7 @@ def pco_edge_camera_child_process(
     camera.arm(num_buffers=3)
     info("Done initializing")
     preframes = 3
+    first_trigger_timeout_seconds = 0
     status = 'Normal'
     while True:
         if commands.poll():
@@ -711,6 +716,12 @@ def pco_edge_camera_child_process(
             elif cmd == 'set_preframes':
                 preframes = args['preframes']
                 commands.send(preframes)
+            elif cmd == 'get_first_trigger_timeout_seconds':
+                commands.send(first_trigger_timeout_seconds)
+            elif cmd == 'set_first_trigger_timeout_seconds':
+                first_trigger_timeout_seconds = args[
+                    'first_trigger_timeout_seconds']
+                commands.send(first_trigger_timeout_seconds)
             else:
                 info("Unrecognized command: " + cmd)
                 commands.send("unrecognized_command")
@@ -737,9 +748,11 @@ def pco_edge_camera_child_process(
                     camera.record_to_memory(
                         num_images=a.shape[0] + preframes,
                         preframes=preframes,
-                        out=a)
+                        out=a,
+                        first_trigger_timeout_seconds=(
+                            first_trigger_timeout_seconds))
                 except pco.TimeoutError as e:
-                    info('TimeoutError, %i acquired'%(e.num_acquired))
+                    info('TimeoutError: %s'%(e.value))
                     status = 'TimeoutError'
                     #FIXME: we can do better, probably. Keep trying?
                     #Should we zero the remainder of 'a'?
