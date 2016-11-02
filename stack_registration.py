@@ -271,6 +271,10 @@ def coinflip_split(a, photoelectrons_per_count):
     return out_1, photoelectrons - out_1
 
 if __name__ == '__main__':
+    try:
+        from scipy.ndimage import gaussian_filter
+    except ImportError:
+        def gaussian_filter(x, sigma): return x # No blurring; whatever.
     ## Simple debugging tests. Put a 2D TIF where python can find it.
     print("Loading test object...")
     obj = np_tif.tif_to_array('blobs.tif').astype(np.float64)
@@ -290,11 +294,17 @@ if __name__ == '__main__':
         ]
     bucket_size = (1, 4, 4)
     crop = 8
+    blur = 4
+    brightness = 0.1
     print("Creating shifted stack from test object...")
     shifted_obj = np.zeros_like(obj)
     stack = np.zeros((len(shifts),
                       obj.shape[1]//bucket_size[1] - 2*crop,
                       obj.shape[2]//bucket_size[2] - 2*crop))
+    expected_phases = np.zeros((len(shifts),) +
+                               np.fft.rfft(stack[0, :, :]).shape)
+    k_ud, k_lr = np.fft.fftfreq(stack.shape[1]), np.fft.rfftfreq(stack.shape[2])
+    k_ud, k_lr = k_ud.reshape(k_ud.size, 1), k_lr.reshape(1, k_lr.size)
     for s, (y, x) in enumerate(shifts):
         top = max(0, y)
         lef = max(0, x)
@@ -302,8 +312,14 @@ if __name__ == '__main__':
         rig = min(obj.shape[-1], obj.shape[-1] + x)
         shifted_obj.fill(0)
         shifted_obj[0, top:bot, lef:rig] = obj[0, top-y:bot-y, lef-x:rig-x]
-        stack[s, :, :] = bucket(shifted_obj, bucket_size
-                                  )[0, crop:-crop, crop:-crop]
+        stack[s, :, :] = np.random.poisson(
+            brightness *
+            bucket(gaussian_filter(shifted_obj, blur), bucket_size
+                   )[0, crop:-crop, crop:-crop])
+        expected_phases[s, :, :] = np.angle(np.fft.fftshift(
+            expected_cross_power_spectrum((y/bucket_size[1], x/bucket_size[2]),
+                                          k_ud, k_lr), axes=0))
+    np_tif.array_to_tif(expected_phases, 'DEBUG_expected_phase_vs_ref.tif')
     np_tif.array_to_tif(stack, 'DEBUG_stack.tif')
     print(" Done.")
     print("Registering test stack...")
