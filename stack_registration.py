@@ -85,7 +85,7 @@ def stack_registration(
         cross_power_spectra = np.zeros_like(masked_stack_ft)
         spikes = np.zeros(s.shape, dtype=np.float64)
     for which_slice in range(s.shape[0]):
-        if debug: print("Slice", which_slice)
+        if debug: print("Calculating registration for slice", which_slice)
         ## Compute the cross-power spectrum of our slice, and mask out
         ## the high spatial frequencies.
         current_slice = s[which_slice, :, :] * mask_ud * mask_lr
@@ -130,15 +130,6 @@ def stack_registration(
                            args=(cross_power_spectrum,),
                            method='Nelder-Mead').x
         registration_shifts.append(loc)
-        if register_in_place:
-            ## Modify the input stack in-place so it's registered.
-            phase_correction = expected_cross_power_spectrum(loc, k_ud, k_lr)
-            shift_me = s[which_slice, :, :]
-            if not shift_me.dtype == np.float64:
-                shift_me = shift_me.astype(np.float64)
-            s[which_slice, :, :] = np.fft.irfftn(
-                np.fft.rfftn(shift_me) / phase_correction,
-                s=current_slice.shape).real
         if debug:
             ## Save some intermediate data to help with debugging
             masked_stack[which_slice, :, :] = current_slice
@@ -149,6 +140,13 @@ def stack_registration(
             cross_power_spectra[which_slice, :, :] = (
                 np.fft.fftshift(cross_power_spectrum, axes=0))
             spikes[which_slice, :, :] = np.fft.fftshift(spike)
+    if register_in_place:
+        ## Modify the input stack in-place so it's registered.
+        if refinement == 'integer':
+            registration_type = 'nearest_integer'
+        else:
+            registration_type = 'fourier_interpolation'
+        apply_registration_shifts(s, registration_shifts)
     if debug:
         np_tif.array_to_tif(masked_stack, 'DEBUG_masked_stack.tif')
         np_tif.array_to_tif(np.log(np.abs(masked_stack_ft)),
@@ -162,11 +160,16 @@ def stack_registration(
         np_tif.array_to_tif(spikes, 'DEBUG_spikes.tif')
         if register_in_place:
             np_tif.array_to_tif(s, 'DEBUG_registered_stack.tif')
-    return registration_shifts
+    return np.array(registration_shifts)
 
 mr_stacky = stack_registration #I like calling it this.
 
-def apply_registration_shifts(s, registration_shifts):
+def apply_registration_shifts(
+    s,
+    registration_shifts,
+    registration_type='fourier_interpolation',
+    edges='zero',
+    ):
     """Modify the input stack `s` in-place so it's registered.
 
     If you used `stack_registration` to calculate `registration_shifts`
@@ -176,16 +179,28 @@ def apply_registration_shifts(s, registration_shifts):
     """
     assert len(s.shape) == 3
     assert len(registration_shifts) == s.shape[0]
-    k_ud, k_lr = np.fft.fftfreq(s.shape[-2]), np.fft.rfftfreq(s.shape[-1])
+    assert registration_type in ('fourier_interpolation', 'nearest_integer')
+    assert edges in ('sloppy', 'zero')
+    n_y, n_x = s.shape[-2:]
+    k_ud, k_lr = np.fft.fftfreq(n_y), np.fft.rfftfreq(n_x)
     k_ud, k_lr = k_ud.reshape(k_ud.size, 1), k_lr.reshape(1, k_lr.size)
     for which_slice, loc in enumerate(registration_shifts):
-        phase_correction = expected_cross_power_spectrum(loc, k_ud, k_lr)
-        shift_me = s[which_slice, :, :]
-        if not shift_me.dtype == np.float64:
-            shift_me = shift_me.astype(np.float64)
-        s[which_slice, :, :] = np.fft.irfftn(
-            np.fft.rfftn(shift_me) / phase_correction,
-            s=current_slice.shape).real
+        y, x = -int(np.round(loc[0])), -int(np.round(loc[1]))
+        top, bot = max(0, y), min(n_y, n_y+y)
+        lef, rig = max(0, x), min(n_x, n_x+x),
+        if registration_type == 'nearest_integer':
+            s[which_slice, top:bot, lef:rig] = (
+                s[which_slice, top-y:bot-y, lef-x:rig-x])
+        elif registration_type == 'fourier_interpolation':
+            phase_correction = expected_cross_power_spectrum(loc, k_ud, k_lr)
+            shift_me = s[which_slice, :, :].astype(np.float64, copy=False)
+            s[which_slice, :, :] = np.fft.irfftn(
+                np.fft.rfftn(shift_me) / phase_correction, s=(n_y, n_x)).real
+        if edges == 'sloppy':
+            pass
+        elif edges == 'zero':
+            s[which_slice, :top, :].fill(0), s[which_slice, bot:, :].fill(0)
+            s[which_slice, :, :lef].fill(0), s[which_slice, :, rig:].fill(0)
     return None #`s` is modified in-place.
 
 def expected_cross_power_spectrum(shift, k_ud, k_lr):
@@ -205,7 +220,9 @@ def estimate_fourier_cutoff_radius(s, debug=False):
 
     The Fourier transform amplitudes of most microscope images show a
     clear circular edge, outside of which there is no signal. This
-    function tries to estimate the position of this edge.
+    function tries to estimate the position of this edge. The estimation
+    is not especially precise, but seems to be withint the tolerance of
+    `stack_registration`.
     """
     # We only need one slice for this estimate:
     if len(s.shape) == 3: s = s[0, :, :]
@@ -242,6 +259,8 @@ def bucket(x, bucket_size):
     the array with a single pixel which is the sum of the N replaced
     pixels. See: http://stackoverflow.com/q/36269508/513688
     """
+    for b in bucket_size: assert float(b).is_integer()
+    bucket_size = [int(b) for b in bucket_size]
     x = np.ascontiguousarray(x)
     new_shape = np.concatenate((np.array(x.shape) // bucket_size, bucket_size))
     old_strides = np.array(x.strides)
@@ -331,4 +350,3 @@ if __name__ == '__main__':
     for s, cs in zip(shifts, calculated_shifts):
         print('%0.2f (%i)'%(cs[0] * bucket_size[1], s[0]),
               '%0.2f (%i)'%(cs[1] * bucket_size[2], s[1]))
-        np_tif.array_to_tif(stack, 'DEBUG_stack_registered.tif')
