@@ -1,19 +1,18 @@
 import serial
 
 class SpectraX:
-    """Interacts with Lumencor SpectraX through a serial port."""
+    """Controls Lumencor SpectraX through a serial port."""
     
     def __init__(self, which_port, verbose=True):
         """Constructor for SpectraX class.
         
         Arguments:
-            which_port -- Speficify which Com port the SpectraX is connected to
-                          e.g. 'Com6'
+            which_port -- Specify which serial port the SpectraX is connected to
+                          e.g. 'COM6' (on Windows).
         Keyword arguments:
             verbose -- True | False. Specify if print statements will be
                        executed. This is useful for debug purposes. 
         """
-        
         self.verbose = verbose
         self.port = serial.Serial(port=which_port, baudrate=9600, timeout=.25)
         ## Set up initial states
@@ -21,40 +20,39 @@ class SpectraX:
                                  'teal':0}
         self.led_states = {'red':False, 'green':False, 'cyan':False, 'uv':False,
                             'blue':False, 'teal':False, 'yellow_filter':False}
-        if self.verbose:
-            print(" SpectraX initializing...")
+        if self.verbose: print("SpectraX initializing...")
         ## Write initial 'must be issued' commands to the port
-        self.send(b'\x57\x02\xff\x50')
-        self.send(b'\x57\x02\xff\x50')
-        ## Set initial led intensities of 0 and ensure SpextraX is responding
+        self._send(b'\x57\x02\xff\x50')
+        self._send(b'\x57\x02\xff\x50')
+        ## Set initial led intensities to 0 and ensure SpextraX is responding
         self.set_intensity(blocking=False, **self.led_intensities)
         self._force_response()
-        if self.verbose:
-            print(" SpectraX is ready!") 
+        if self.verbose: print(" SpectraX is ready!") 
     
-    def send(self, cmd, expected_response=0):
+    def _send(self, cmd, expected_response=0):
         """Send bytes to the SpectraX serial port.
         
         Arguments:
             cmd -- bytes to write to the serial port
         Keyword Arguments:
             expected_response -- number of bytes expected for a response
-                                 defualts to 0 (no response) 
+                                 defaults to 0 (no response) 
         Returns:
             None if expected_reponse == 0
             bytes if expected_response > 0
         """
-        
-        if self.verbose:
-            print('\tSending command to SpectraX:',
-                  ' '.join('%02x'%i for i in cmd))
         assert type(cmd) is bytes
+        assert expected_response >= 0
+        assert int(expected_response) == expected_response
+        if self.verbose:
+            print(' Sending command to SpectraX:',
+                  ' '.join('%02x'%i for i in cmd))
         self.port.write(cmd)
-        if expected_response:
+        if expected_response > 0:
             response = self.port.read(expected_response)
             if self.verbose:
-                print( '\tReading response from SpectraX:',
-                       ' '.join('%02x'%i for i in response))
+                print(' Reading response from SpectraX:',
+                      ' '.join('%02x'%i for i in response))
             return response
         else:
             return None
@@ -67,21 +65,19 @@ class SpectraX:
         Returns:
             The current temperature of the SpectraX unit in degrees C
         """
-        if self.verbose:
-            print(" Checking SpectraX temperature...")
-        response = self.send(b'\x53\x91\x02\x50', expected_response=2)
+        if self.verbose: print("Checking SpectraX temperature...")
+        response = self._send(b'\x53\x91\x02\x50', expected_response=2)
         temperature = 0.125 * (int.from_bytes(response, byteorder='big') >> 5)
-        if self.verbose:
-            print(" SpectraX is %s degrees" % temperature)
+        if self.verbose: print("SpectraX is %s degrees" % temperature)
         return temperature
 
     def _force_response(self):
         """Force a response from the SpectraX unit.
         
-        The serial port protocol for interacting with the SpectraX unit does not 
-        provide a response upon reciept of command. This function uses the 
-        'check temperature' serial command and will block until a response is 
-        recieved.
+        The serial port protocol for interacting with the SpectraX unit
+        does not provide a response upon receipt of command. This
+        function uses the 'check temperature' serial command and will
+        block until a response is received.
         
         If no response is received, this will result in an AssertionError.
         
@@ -93,14 +89,10 @@ class SpectraX:
         Returns:
             None
         """
-        
-        if self.verbose:
-           print(" Checking SpectraX for responsiveness...")
-        response = self.send(b'\x53\x91\x02\x50', expected_response=2)
-        ## TODO Better checking of response, but this makes sure it isnt 0
+        if self.verbose: print("Checking SpectraX for responsiveness...")
+        response = self._send(b'\x53\x91\x02\x50', expected_response=2)
         assert len(response) == 2
-        if self.verbose:
-            print (" \t... ok to proceed")
+        if self.verbose: print (" ... ok to proceed")
         
     def _intensity_setter(self, led, intensity, blocking = True):
         """Set intensity of specific led.
@@ -112,17 +104,16 @@ class SpectraX:
             intensity -- int between 0 and 255. Specify the intensity of this
                          led. This value has not been tested for linearity. 
                          Providing a value outside of allowable range will 
-                         result in Assertion Error.
+                         result in AssertionError.
             
         Keyword Arguments:
             blocking -- True | False. Set if this command will call
                         _force_response. If true, this command should block
-                        until a response is recieved. 
-            
+                        until a response is received. 
         """
         assert 0 <= intensity <= 255
         color = led.lower()
-        self.send(({'blue':b'\x53\x1a\x03\x01',
+        self._send(({'blue':b'\x53\x1a\x03\x01',
                 'teal':b'\x53\x1a\x03\x02',
                 'uv':b'\x53\x18\x03\x01',
                 'cyan':b'\x53\x18\x03\x02',
@@ -130,7 +121,7 @@ class SpectraX:
                 'red':b'\x53\x18\x03\x08'}[color]+
                (((4095-intensity) << 12)+80).to_bytes(3,byteorder='big')))
         if self.verbose:
-            print(" SpectraX: Setting %s intensity to %s / 255" % (color, 
+            print("SpectraX: Setting %s intensity to %s / 255" % (color, 
                   intensity))
         if blocking:
             self._force_response()        
@@ -164,7 +155,7 @@ class SpectraX:
 
     def _state_cmd_generator(self,red=None,green=None,cyan=None,uv=None,
                               blue=None,teal=None, yellow_filter=None):
-        """Creates bytes to write to serial port to specifiy LED states.
+        """Formats bytes to write to serial port to specifiy led states.
         
         This function was written to clarify the syntax of set_led_state
         function.
@@ -179,10 +170,9 @@ class SpectraX:
             yellow_filter -- True | False. True for "ON". False for "OFF".
         
         Returns:
-            bytes -- in a format written to serial port that will set led 
-            enables/disabled states.   
+            bytes -- in a format  to be written to serial port for setting led 
+            enabled/disabled states.   
         """
-        
         states_byte = (127-red*1-green*2-cyan*4-uv*8-
                         yellow_filter*16-blue*32-teal*64)          
         return b'\x4f'+states_byte.to_bytes(1,byteorder='big')+b'\x50'
@@ -190,6 +180,9 @@ class SpectraX:
     def set_led_state(self, red=None, green=None, cyan=None, uv=None,
                       blue=None, teal=None, yellow_filter=None, blocking=True):
         """Enables/disables specific leds of the SpectraX.
+
+        Enabling 'yellow_filter' will shift the spectra of the light from the
+        green led.
         
         Keyword Arguments:
             red -- True | False. True for "ON". False for "OFF".
@@ -198,9 +191,8 @@ class SpectraX:
             uv -- True | False. True for "ON". False for "OFF".
             blue -- True | False. True for "ON". False for "OFF".
             teal -- True | False. True for "ON". False for "OFF".
-            yellow_filter -- True | False. True for "ON". False for "OFF".
+            yellow_filter -- True | False. True for "IN". False for "OUT".
         """
-        
         states_to_set = locals()
         states_to_set.pop('self')
         states_to_set.pop('blocking')
@@ -209,15 +201,13 @@ class SpectraX:
             if states_to_set[led] is not None:
                 self.led_states[led] = states_to_set[led]
         if self.verbose:
-            print(' Setting SpectraX LED states:')
+            print('Setting SpectraX LED states:')
             for led in self.led_states:
-                print('\t\t %s enabled: %s' % (led, self.led_states[led]))
-        self.send(self._state_cmd_generator(**self.led_states))
+                print(' %s enabled: %s' % (led, self.led_states[led]))
+        self._send(self._state_cmd_generator(**self.led_states))
         if blocking:
             self._force_response()
-
-        
-    
+            
 if __name__ == '__main__':
     import time
     spectrax = SpectraX('COM6', verbose=False)
