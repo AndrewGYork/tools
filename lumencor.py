@@ -113,15 +113,16 @@ class SpectraX:
         """
         assert 0 <= intensity <= 255
         color = led.lower()
-        self._send(({'blue':b'\x53\x1a\x03\x01',
-                'teal':b'\x53\x1a\x03\x02',
-                'uv':b'\x53\x18\x03\x01',
-                'cyan':b'\x53\x18\x03\x02',
-                'green':b'\x53\x18\x03\x04',
-                'red':b'\x53\x18\x03\x08'}[color]+
-               (((4095-intensity) << 12)+80).to_bytes(3,byteorder='big')))
+        self._send(({
+            'blue':b'\x53\x1a\x03\x01',
+            'teal':b'\x53\x1a\x03\x02',
+            'uv':b'\x53\x18\x03\x01',
+            'cyan':b'\x53\x18\x03\x02',
+            'green':b'\x53\x18\x03\x04',
+            'red':b'\x53\x18\x03\x08'}[color]+
+                    (((4095-intensity) << 12)+80).to_bytes(3,byteorder='big')))
         if self.verbose:
-            print("SpectraX: Setting %s intensity to %s / 255" % (color, 
+            print("Setting SpectraX %s intensity to %i / 255" % (color, 
                   intensity))
         if blocking:
             self._force_response()        
@@ -142,10 +143,9 @@ class SpectraX:
             uv -- int [0..255].
             blue -- int [0..255].
             teal -- int [0..255].
-            blocking -- True | False. Check for the units ability to respond
+            blocking -- True | False. Check for the unit's ability to respond
                         after setting all intensities. 
         """
-        
         intensities = locals()
         intensities.pop('self')
         intensities.pop('blocking')
@@ -153,28 +153,24 @@ class SpectraX:
             if intensity is not None:
                 self._intensity_setter(color, intensity, blocking=blocking)
 
-    def _state_cmd_generator(self,red=None,green=None,cyan=None,uv=None,
-                              blue=None,teal=None, yellow_filter=None):
+    def _state_cmd_generator(self):
         """Formats bytes to write to serial port to specifiy led states.
         
         This function was written to clarify the syntax of set_led_state
         function.
         
-        Keyword Arguments:
-            red -- True | False. True for "ON". False for "OFF".
-            green -- True | False. True for "ON". False for "OFF".
-            cyan -- True | False. True for "ON". False for "OFF".
-            uv -- True | False. True for "ON". False for "OFF".
-            blue -- True | False. True for "ON". False for "OFF".
-            teal -- True | False. True for "ON". False for "OFF".
-            yellow_filter -- True | False. True for "ON". False for "OFF".
-        
         Returns:
             bytes -- in a format  to be written to serial port for setting led 
             enabled/disabled states.   
         """
-        states_byte = (127-red*1-green*2-cyan*4-uv*8-
-                        yellow_filter*16-blue*32-teal*64)          
+        states_byte = (127
+                       -self.led_states['red']*1
+                       -self.led_states['green']*2
+                       -self.led_states['cyan']*4
+                       -self.led_states['uv']*8
+                       -self.led_states['yellow_filter']*16
+                       -self.led_states['blue']*32
+                       -self.led_states['teal']*64)          
         return b'\x4f'+states_byte.to_bytes(1,byteorder='big')+b'\x50'
 
     def set_led_state(self, red=None, green=None, cyan=None, uv=None,
@@ -203,8 +199,8 @@ class SpectraX:
         if self.verbose:
             print('Setting SpectraX LED states:')
             for led in self.led_states:
-                print(' %s enabled: %s' % (led, self.led_states[led]))
-        self._send(self._state_cmd_generator(**self.led_states))
+                print(' %13s: %s' % (led, self.led_states[led]))
+        self._send(self._state_cmd_generator())
         if blocking:
             self._force_response()
             
