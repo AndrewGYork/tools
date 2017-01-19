@@ -312,7 +312,7 @@ class C867_XY_Stage:
         self.port.close()
 
 if __name__ == '__main__':
-    stage = XY_Stage(which_port='COM5', verbose=True)
+    stage = C867_XY_Stage(which_port='COM5', verbose=True)
     # Clean-ish slate for testing:
     stage._reboot()
     # Check how fast we can execute round-trip motions:
