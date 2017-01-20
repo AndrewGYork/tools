@@ -17,7 +17,7 @@ class Edge:
         except (WindowsError, AssertionError):
             print("Failed to open pco.edge camera.")
             print(" *Is the camera on, and plugged into the computer?")
-            print(" *Is CamWare running?")
+            print(" *Is CamWare running? It shouldn't be!")
             print(" *Is sc2_cl_me4.dll in the same directory as SC2_Cam.dll?")
             raise
         if self.verbose: print(" Camera open.")
@@ -738,12 +738,15 @@ def pco_edge_camera_child_process(
             # Fill the data buffer with images from the camera
             time_received = clock()
             process_me = permission_slip['which_buffer']
+            ## Trust IDP to request a legal num_slices
+            num_slices = permission_slip.get('num_slices', buffer_shape[0])
             info("start buffer %i, acquiring %i frames and %i preframes"%(
-                process_me, buffer_shape[0], preframes))
+                process_me, num_slices, preframes))
             with data_buffers[process_me].get_lock():
-                a = np.frombuffer(data_buffers[process_me].get_obj(),
-                                  dtype=np.uint16)[:buffer_size
-                                                   ].reshape(buffer_shape)
+                a = np.frombuffer(
+                    data_buffers[process_me].get_obj(),
+                    dtype=np.uint16)[:buffer_size].reshape(buffer_shape
+                                                           )[:num_slices, :, :]
                 try:
                     camera.record_to_memory(
                         num_images=a.shape[0] + preframes,
