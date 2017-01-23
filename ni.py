@@ -87,6 +87,7 @@ class Analog_Out:
         self._write_voltages()
         if self.num_digital_lines > 0:
             self._write_digits()
+        self.play_voltages(force_final_zeros=False)
         return None
 
     def set_rate(self, rate):
