@@ -1,5 +1,6 @@
 ## I want nano's keyboard shortcuts to be more like other GUI text 
-## editors, and I want python syntax highlighting.
+## editors, and I want python syntax highlighting. If you feel the same 
+## way, put this file in your home directory.
 include /usr/share/nano/python.nanorc
 set morespace
 set autoindent
