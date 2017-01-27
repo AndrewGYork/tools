@@ -1,0 +1,21 @@
+## I want nano's keyboard shortcuts to be more like other GUI text 
+## editors, and I want python syntax highlighting.
+include /usr/share/nano/python.nanorc
+set morespace
+set autoindent
+set tabsize 4
+set tabstospaces
+set smooth
+bind ^H help main
+bind ^Q exit main
+bind ^S writeout main
+bind ^F whereis main
+bind ^G searchagain main
+bind ^R replace main
+bind ^X cut main
+bind ^C copytext main
+bind ^V uncut main
+bind ^Z undo main
+bind ^Y redo main
+bind ^L gotoline main
+bind ^A mark main
