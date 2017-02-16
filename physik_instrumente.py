@@ -4,7 +4,8 @@ import serial
 class C867_XY_Stage:
     def __init__(self, which_port, verbose=True):
         try:
-            self.port = serial.Serial(port=which_port, baudrate=115200, timeout=1)
+            self.port = serial.Serial(
+                port=which_port, baudrate=115200, timeout=1)
         except:
             print("Failed to open serial port", which_port, "for PI stage.",
                   "Is it on, plugged in, and on the serial port you think?")
@@ -40,14 +41,11 @@ class C867_XY_Stage:
             print(" Stage d-limits:", self.dx_max, self.dy_max, '\n')
         return None
 
-    def send(self, cmd, res=True, timeout=None):
+    def send(self, cmd, res=True):
         if self.verbose: print(" Sending command to stage:", cmd)
         # Allow cmd to be bytes or string
         if type(cmd) is str: cmd = bytes(cmd, encoding='ascii')
         assert type(cmd) is bytes
-        # Allow a custom 'timeout' for slow-responding commands:
-        old_timeout = self.port.timeout
-        if timeout is not None: self.port.timeout = timeout
         # Communicate:
         self.port.write(cmd + b'\n')
         responses = []
@@ -61,7 +59,6 @@ class C867_XY_Stage:
                 if len(response) == 1: break
                 if response[-2] != 32: break
         # Cleanup:
-        if timeout is not None: self.port.timeout = old_timeout
         assert self.port.in_waiting == 0
         self._check_errors()
         return responses
@@ -311,45 +308,220 @@ class C867_XY_Stage:
     def close(self):
         self.port.close()
 
-if __name__ == '__main__':
-    stage = C867_XY_Stage(which_port='COM5', verbose=True)
-    # Clean-ish slate for testing:
-    stage._reboot()
-    # Check how fast we can execute round-trip motions:
-    num_motions = 20
-    motion_size_x = 1
-    motion_size_y = 1
-    print("Testing speed...")
-    
-    # Test conditions for speed test 1:
-    stage.enable_joystick(False)
-    stage._set_settling_time(0.100, 0.100)
-    stage._set_precision(10, 10)
-    stage.set_velocity(120, 120)
-    stage.verbose = False
-    stage.move(0, 0)    
+class E753_Z_Piezo:
+    def __init__(self, which_port, verbose=True):
+        try:
+            self.port = serial.Serial(
+                port=which_port, baudrate=115200, timeout=1)
+        except:
+            print("Failed to open serial port", which_port, "for PI Z piezo.",
+                  "Is it on, plugged in, and on the serial port you think?")
+            raise
+        self.verbose = verbose
+        self.pos_min = float(self.send('TMN?')[0].split('=')[1])
+        self.pos_max = float(self.send('TMX?')[0].split('=')[1])
+        self.get_target_position()
+        self.get_real_position()
+        self.get_analog_control_state()
+        self.analog_offset = float(
+            self.send('SPA? 2 0x02000200')[0].split('=')[1])
+        if self.analog_offset != 50.0:
+            self._set_offset()
+        self.analog_gain = float(
+            self.send('SPA? 2 0x02000300')[0].split('=')[1])
+        if self.analog_gain != .5:
+            self._set_gain()
+        if self.verbose:
+            print(" Z piezo limits:", self.pos_min, self.pos_max)
+            print(" Z piezo target:", self.target_pos)
+            print(" Z piezo real pos:", self.real_pos)
+            print(" Z piezo analog control:", self.analog_control)
+            print(" Z piezo analog offset:", self.analog_offset)
+            print(" Z piezo analog gain:", self.analog_gain)
+        return None
 
-    start = time.perf_counter()
-    for i in range(num_motions):
-        stage.move(0, 0)
-        stage.move(motion_size_x, motion_size_y)
-    end = time.perf_counter()
-    print(end - start, 'seconds')
-    # These conditions should give high-ish speed:
-    stage.enable_joystick(False)
-    stage._set_settling_time(0.001, 0.001)
-    stage._set_precision(10, 10)
-    stage.set_velocity(120, 120)
-    stage.verbose = False
-    stage.move(0, 0)
-    # Check how fast we can execute round-trip motions:
-    print("Testing speed...")
-    start = time.perf_counter()
-    for i in range(num_motions):
-        stage.move(0, 0)
-        stage.move(motion_size_x, motion_size_y)
-    end = time.perf_counter()
-    print(end - start, 'seconds')
+    def send(self, cmd, res=True):
+        if self.verbose: print(" Sending command to Z piezo:", cmd)
+        # Allow cmd to be bytes or string
+        if type(cmd) is str: cmd = bytes(cmd, encoding='ascii')
+        assert type(cmd) is bytes
+        # Communicate:
+        self.port.write(cmd + b'\n')
+        responses = []
+        if res:
+            while True:
+                response = self.port.readline()
+                assert len(response) > 0 # We timed out
+                if self.verbose: print("  Response from Z piezo:", response)
+                responses.append(response.rstrip().decode('ascii'))
+                # Non-final responses have a trailing space:
+                if len(response) == 1: break
+                if response[-2] != 32: break
+        # Cleanup:
+        assert self.port.in_waiting == 0
+        self._check_errors()
+        return responses
+
+    def _check_errors(self):
+        self.port.write(b'ERR?\n')
+        self.err = self.port.readline()
+        if not self.err == b'0\n':
+            raise RuntimeError(
+                "Z piezo error code: " + self.err.decode("ascii"))
+        return None
+
+    def get_real_position(self):
+        if self.verbose: print("Getting Z piezo real position...")
+        self.real_pos = float(self.send('POS?')[0].split('=')[1])
+        if self.verbose: print(" Real Z piezo position:", self.real_pos)
+        return self.real_pos
+
+    def get_target_position(self):
+        if self.verbose: print("Getting Z piezo target position...")
+        self.target_pos = float(self.send('MOV?')[0].split('=')[1])
+        if self.verbose: print(" Z piezo target position:", self.target_pos)
+        return self.target_pos        
+
+    def get_target_state(self):
+        if self.verbose: print("Getting Z piezo on-target state...")
+        on_target = int(self.send('ONT?')[0].split('=')[1])
+        if self.verbose: print(" Z piezo on-target state", on_target)
+        return on_target
+
+    def set_precision(self,
+                      settling_window=None,
+                      settling_time=None):
+        ## settling_window in microns
+        assert 0 < settling_window < 100
+        ## settling_time in seconds
+        assert 0 <= settling_time < 1
+        if settling_window != None:
+            self.send('SPA 1 0x07000900 %0.9f' % settling_window, res=False)
+        if settling_time != None:
+            self.send('SPA 1 0x07000901 %0.9f' % settling_time, res=False)
+        return None
     
-    stage.close()
+    def move(self, target):
+        assert self.pos_min <= target <= self.pos_max
+        self.target_pos = target
+        if self.verbose: print('Moving Z piezo to: %0.3f' % self.target_pos)
+        self.send('MOV 1 %0.9f' % self.target_pos, res=False)           
+        return None
+
+    def _finish_moving(self):
+        ## This probably doesn't need to be used because the piezo is quick
+        if self.verbose: print("Finishing Z piezo...")
+        while True:
+            self.port.write(b'\x05')
+            response = self.port.read(2)
+            if response == b'0\n':
+                break
+        if self.verbose: print(' Z piezo motion complete.\n')
+        self._check_errors()
+        return None
+
+    def _set_offset(self, offset=50):
+        ## Requires special persmission for writing this parameter
+        self.send('CCL 1 advanced', res=False)
+        ## Set 'offset' for scaling analog input 2
+        self.send('SPA 2 0x02000200 %0.9f' % offset, res=False)
+        if self.verbose: print('Setting Z piezo analog offset to %s' % offset)
+        ## Return permssions to default
+        self.send('CCL 0', res=False)
+        return None
+    
+    def _set_gain(self, gain=.5):
+        ## Requires special persmission for writing this parameter
+        self.send('CCL 1 advanced', res=False)
+        ## Set 'gain' for scaling analog input 2
+        self.send('SPA 2 0x02000300 %0.9f' % gain, res=False)
+        if self.verbose: print('Setting Z piezo analog offset to %s' % gain)
+        ## Return permssions to default
+        self.send('CCL 0', res=False)
+        return None
+           
+    def set_analog_control(self, analog_control=True):
+        self.analog_control = analog_control
+        ## Requires special persmission for writing this parameter
+        self.send('CCL 1 advanced', res=False)
+        if self.analog_control:
+            self.send('SPA 1 0x06000500 2', res=False)
+        else:
+            self.send('SPA 1 0x06000500 0', res=False)            
+        if self.verbose:
+            print('Setting Z piezo analog control: %s' % analog_control)
+        ## Return permssions to default
+        self.send('CCL 0', res=False)
+        
+    def get_analog_control_state(self):
+        analog_control_state = self.send('SPA? 1 0x06000500')[0].split('=')[1]
+        if analog_control_state == '2':
+            self.analog_control = True
+        else:
+            self.analog_control = False
+        return self.analog_control
+    
+    def stop(self):
+        self.analog_control = False
+        self.send('STP', res = False)
+    
+    def close(self):
+        self.stop()
+        self.move(50)
+        self.port.close()
+        
+if __name__ == '__main__':
+
+    ##
+    ## RemoteRefocus test code
+    ##
+    z_piezo = E753_Z_Piezo(which_port = 'COM6', verbose=True)
+    z_piezo.set_analog_control(True)
+    while True:
+        input('Hit enter to get real position')
+        print(z_piezo.get_real_position())
+    ##
+    ## Stage test code
+    ##
+##    stage = C867_XY_Stage(which_port='COM5', verbose=True)
+##    # Clean-ish slate for testing:
+##    stage._reboot()
+##    # Check how fast we can execute round-trip motions:
+##    num_motions = 20
+##    motion_size_x = 1
+##    motion_size_y = 1
+##    print("Testing speed...")
+##    
+##    # Test conditions for speed test 1:
+##    stage.enable_joystick(False)
+##    stage._set_settling_time(0.100, 0.100)
+##    stage._set_precision(10, 10)
+##    stage.set_velocity(120, 120)
+##    stage.verbose = False
+##    stage.move(0, 0)    
+##
+##    start = time.perf_counter()
+##    for i in range(num_motions):
+##        stage.move(0, 0)
+##        stage.move(motion_size_x, motion_size_y)
+##    end = time.perf_counter()
+##    print(end - start, 'seconds')
+##    # These conditions should give high-ish speed:
+##    stage.enable_joystick(False)
+##    stage._set_settling_time(0.001, 0.001)
+##    stage._set_precision(10, 10)
+##    stage.set_velocity(120, 120)
+##    stage.verbose = False
+##    stage.move(0, 0)
+##    # Check how fast we can execute round-trip motions:
+##    print("Testing speed...")
+##    start = time.perf_counter()
+##    for i in range(num_motions):
+##        stage.move(0, 0)
+##        stage.move(motion_size_x, motion_size_y)
+##    end = time.perf_counter()
+##    print(end - start, 'seconds')
+##    
+##    stage.close()
+
 
