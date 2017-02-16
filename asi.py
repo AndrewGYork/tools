@@ -29,6 +29,67 @@ class FW_1000:
         self.finished_rebooting = False # Might have to wait for complaints!
         return None
 
+    def move(self, pos):
+        assert pos in range(8) # 8 positions per wheel
+        if self.verbose: print('Moving filter wheel to position', pos)
+        self.send('MP %d' % pos)
+        self._finish_moving()
+        return None
+
+    def set_sequences(self, sequence):
+        assert len(sequence) == 8 # 8 positions per sequence
+        for s in sequence:
+            assert s in range(-1, 8) # 8 positions per wheel
+        if not hasattr(self, 'sequences'): # Just for initialization
+            self.sequences = [[-2] * 8 for i in self.which_wheels]
+        for i in range(8):
+            if sequence[i] != self.sequences[self.active_wheel][i]:
+                self.send('P%d %d'%(i, sequence[i]))
+        self.sequences[self.active_wheel] = sequence
+        return None
+
+    def reset_protocol(self, protocol_pos=0):
+        assert 0 <= protocol_pos <= 7
+        if self.verbose:
+            print('Jumping to entry %d of filter wheel sequence' % protocol_pos)
+        return self.send('G%d' % protocol_pos)
+
+    def set_speed(self, s):
+        """1 is slowest, 9 is fastest. Use s=0 for 'default'"""
+        assert s in range(10)
+        return self.send('SV %d'%s)
+
+    def set_active_wheel(self, which_wheel):
+        assert which_wheel in self.which_wheels
+        self.active_wheel = which_wheel
+        return self.send('FW %d' % which_wheel)
+
+    def send(self, cmd):
+        if not self.finished_rebooting: self._finish_init()
+        if self.verbose: print(' Sent to wheel: %-6s' %cmd, end='') 
+        self.port.write(bytes(cmd, 'ascii') + b'\r')
+        r = self.port.readline().strip().decode('ascii')
+        assert self.port.read(1) == b'\r'
+        assert self.port.in_waiting == 0
+        if not r.startswith(cmd):
+            raise IOError('Unexpected response from ASI filter wheel: ' + r)
+        r = r[len(cmd):].strip()
+        if self.verbose: print(' (Response: ', r, ')', sep='')
+        return r
+
+    def close(self):
+        self.port.close()
+        return None
+    
+    def _finish_moving(self):
+        if self.verbose: print(' Finishing motion...', end='')
+        while True:
+            self.port.write(b'?')
+            if self.port.read(1) == b'0': break
+            if self.verbose: print('.', end='')
+        if self.verbose: print(' done.')
+        return None
+
     def _finish_init(self):
         if self.finished_rebooting: return None
         if self.verbose:
@@ -57,81 +118,15 @@ class FW_1000:
         self.verbose = verbose
         if self.verbose: print('done.')
         return None
-        
-    def send(self, cmd):
-        if not self.finished_rebooting: self._finish_init()
-        if self.verbose: print(' Sent to wheel: %-6s' %cmd, end='') 
-        self.port.write(bytes(cmd, 'ascii') + b'\r')
-        r = self.port.readline().strip().decode('ascii')
-        assert self.port.read(1) == b'\r'
-        assert self.port.in_waiting == 0
-        if not r.startswith(cmd):
-            raise IOError('Unexpected response from ASI filter wheel: ' + r)
-        r = r[len(cmd):].strip()
-        if self.verbose: print(' (Response: ', r, ')', sep='')
-        return r
-
-    def move(self, pos):
-        assert pos in range(8) # 8 positions per wheel
-        if self.verbose: print('Moving filter wheel to position', pos)
-        self.send('MP %d' % pos)
-        self._finish_moving()
-        return None
-        
-    def _finish_moving(self):
-        if self.verbose: print(' Finishing motion...', end='')
-        while True:
-            self.port.write(b'?')
-            if self.port.read(1) == b'0': break
-            if self.verbose: print('.', end='')
-        if self.verbose: print(' done.')
-        return None
-
-    def set_speed(self, s):
-        """1 is slowest, 9 is fastest. Use s=0 for 'default'"""
-        assert s in range(10)
-        return self.send('SV %d'%s)
-
-    def set_active_wheel(self, which_wheel):
-        assert which_wheel in self.which_wheels
-        self.active_wheel = which_wheel
-        return self.send('FW %d' % which_wheel)
-
-    def set_sequences(self, sequence):
-        assert len(sequence) == 8 # 8 positions per sequence
-        for s in sequence:
-            assert s in range(-1, 8) # 8 positions per wheel
-        if not hasattr(self, 'sequences'): # Just for initialization
-            self.sequences = [[-2] * 8 for i in self.which_wheels]
-        for i in range(8):
-            if sequence[i] != self.sequences[self.active_wheel][i]:
-                self.send('P%d %d'%(i, sequence[i]))
-        self.sequences[self.active_wheel] = sequence
-        return None
-                
-    def reset_protocol(self, protocol_pos=0):
-        assert 0 <= protocol_pos <= 7
-        if self.verbose:
-            print('Jumping to entry %d of filter wheel sequence' % protocol_pos)
-        return self.send('G%d' % protocol_pos)
-        
-    def close(self):
-        self.port.close()
-        return None
 
 if __name__ == '__main__':
     for i in range(1000):
         ## Init FW
         fw = FW_1000(which_port='COM7', which_wheels=(0,), verbose=True)
-        fw.set_speed(0)
+        fw.set_speed(0) 
         for i in range(1000):
             fw.move(i%8)
         fw.close()
 
-##    print(fw.sequences)
-##    fw.reset_protocol(5)
-##    fw._finish_moving()
-##    fw.reset_protocol()
-##    fw._finish_moving()
     
 
