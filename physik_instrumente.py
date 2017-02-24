@@ -49,15 +49,14 @@ class C867_XY_Stage:
         # Communicate:
         self.port.write(cmd + b'\n')
         responses = []
-        if res:
-            while True:
-                response = self.port.readline()
-                assert len(response) > 0 # We timed out
-                if self.verbose: print("  Response from stage:", response)
-                responses.append(response.rstrip().decode('ascii'))
-                # Non-final responses have a trailing space:
-                if len(response) == 1: break
-                if response[-2] != 32: break
+        while res:
+            response = self.port.readline()
+            assert response.endswith(b'\n') # We timed out
+            if self.verbose: print("  Response from stage:", response)
+            responses.append(response.rstrip().decode('ascii'))
+            # Non-final responses have a trailing space:
+            if len(response) == 1: break
+            if response[-2] != 32: break
         # Cleanup:
         assert self.port.in_waiting == 0
         self._check_errors()
@@ -314,10 +313,11 @@ class E753_Z_Piezo:
             self.port = serial.Serial(
                 port=which_port, baudrate=115200, timeout=1)
         except:
-            print("Failed to open serial port", which_port, "for PI Z piezo.",
-                  "Is it on, plugged in, and on the serial port you think?")
+            print("Failed to open serial port", which_port, "for PI Z-piezo.",
+                  "Is it on, plugged in, and at the serial port you think?")
             raise
-        self.verbose = verbose
+        self.verbose = False
+        if verbose: print('Initializing Z-piezo...', end='')
         self.pos_min = float(self.send('TMN?')[0].split('=')[1])
         self.pos_max = float(self.send('TMX?')[0].split('=')[1])
         self.get_target_position()
@@ -325,38 +325,39 @@ class E753_Z_Piezo:
         self.get_analog_control_state()
         self.analog_offset = float(
             self.send('SPA? 2 0x02000200')[0].split('=')[1])
-        if self.analog_offset != 50.0:
-            self._set_offset()
+        if abs(self.analog_offset - 50.0) > 1e-5: self._set_offset()
         self.analog_gain = float(
             self.send('SPA? 2 0x02000300')[0].split('=')[1])
-        if self.analog_gain != .5:
-            self._set_gain()
+        if abs(self.analog_gain - 0.5) > 1e-5: self._set_gain()
+        self.send('SVO 1 1', res=False)
+        self.servo_mode = int(self.send('SVO? 1')[0].split('=')[1])
+        self.verbose = verbose
         if self.verbose:
-            print(" Z piezo limits:", self.pos_min, self.pos_max)
-            print(" Z piezo target:", self.target_pos)
-            print(" Z piezo real pos:", self.real_pos)
-            print(" Z piezo analog control:", self.analog_control)
-            print(" Z piezo analog offset:", self.analog_offset)
-            print(" Z piezo analog gain:", self.analog_gain)
+            print(".done!")
+            print(" Z-piezo limits:", self.pos_min, self.pos_max)
+            print(" Z-piezo target:", self.target_pos)
+            print(" Z-piezo real pos:", self.real_pos)
+            print(" Z-piezo analog control:", self.analog_control)
+            print(" Z-piezo analog offset:", self.analog_offset)
+            print(" Z-piezo analog gain:", self.analog_gain)
         return None
 
     def send(self, cmd, res=True):
-        if self.verbose: print(" Sending command to Z piezo:", cmd)
+        if self.verbose: print(" Sending command to Z-piezo:", cmd)
         # Allow cmd to be bytes or string
         if type(cmd) is str: cmd = bytes(cmd, encoding='ascii')
         assert type(cmd) is bytes
         # Communicate:
         self.port.write(cmd + b'\n')
         responses = []
-        if res:
-            while True:
-                response = self.port.readline()
-                assert len(response) > 0 # We timed out
-                if self.verbose: print("  Response from Z piezo:", response)
-                responses.append(response.rstrip().decode('ascii'))
-                # Non-final responses have a trailing space:
-                if len(response) == 1: break
-                if response[-2] != 32: break
+        while res: # Do we expect a response?
+            response = self.port.readline()
+            assert response.endswith(b'\n') # We timed out
+            if self.verbose: print(" Response from Z-piezo:", response)
+            responses.append(response.rstrip().decode('ascii'))
+            # Non-final responses have a trailing space:
+            if len(response) == 1: break #... but length-1 responses don't
+            if response[-2] != 32: break
         # Cleanup:
         assert self.port.in_waiting == 0
         self._check_errors()
@@ -366,31 +367,28 @@ class E753_Z_Piezo:
         self.port.write(b'ERR?\n')
         self.err = self.port.readline()
         if not self.err == b'0\n':
-            raise RuntimeError(
-                "Z piezo error code: " + self.err.decode("ascii"))
+            raise PIError("Z-piezo error code: ", int(self.err))
         return None
 
     def get_real_position(self):
-        if self.verbose: print("Getting Z piezo real position...")
+        if self.verbose: print("Getting Z-piezo real position...")
         self.real_pos = float(self.send('POS?')[0].split('=')[1])
-        if self.verbose: print(" Real Z piezo position:", self.real_pos)
+        if self.verbose: print(" Real Z-piezo position:", self.real_pos)
         return self.real_pos
 
     def get_target_position(self):
-        if self.verbose: print("Getting Z piezo target position...")
+        if self.verbose: print("Getting Z-piezo target position...")
         self.target_pos = float(self.send('MOV?')[0].split('=')[1])
-        if self.verbose: print(" Z piezo target position:", self.target_pos)
-        return self.target_pos        
+        if self.verbose: print(" Z-piezo target position:", self.target_pos)
+        return self.target_pos
 
     def get_target_state(self):
-        if self.verbose: print("Getting Z piezo on-target state...")
+        if self.verbose: print("Getting Z-piezo on-target state...")
         on_target = int(self.send('ONT?')[0].split('=')[1])
-        if self.verbose: print(" Z piezo on-target state", on_target)
+        if self.verbose: print(" Z-piezo on-target state", on_target)
         return on_target
 
-    def set_precision(self,
-                      settling_window=None,
-                      settling_time=None):
+    def set_precision(self, settling_window=None, settling_time=None):
         ## settling_window in microns
         assert 0 < settling_window < 100
         ## settling_time in seconds
@@ -402,84 +400,203 @@ class E753_Z_Piezo:
         return None
     
     def move(self, target):
+        # TODO: what units is this in?
         assert self.pos_min <= target <= self.pos_max
         self.target_pos = target
-        if self.verbose: print('Moving Z piezo to: %0.3f' % self.target_pos)
-        self.send('MOV 1 %0.9f' % self.target_pos, res=False)           
+        if self.verbose: print('Moving Z-piezo to: %0.3f' % self.target_pos)
+        if self.servo_mode == 0:
+            self.send('SVA 1 %0.9f'%self.target_pos, res=False)
+        elif self.servo_mode == 1:
+            self.send('MOV 1 %0.9f'%self.target_pos, res=False)
+        else:
+            raise ValueError("Z-piezo is in the wrong servo mode for motion.")
         return None
 
     def _finish_moving(self):
         ## This probably doesn't need to be used because the piezo is quick
-        if self.verbose: print("Finishing Z piezo...")
+        if self.verbose: print("Finishing Z-piezo motion...")
         while True:
             self.port.write(b'\x05')
             response = self.port.read(2)
-            if response == b'0\n':
-                break
-        if self.verbose: print(' Z piezo motion complete.\n')
+            if response == b'0\n': break
+        if self.verbose: print(' Z-piezo motion complete.')
         self._check_errors()
         return None
 
     def _set_offset(self, offset=50):
-        ## Requires special persmission for writing this parameter
+        ## Requires special permission for writing this parameter
         self.send('CCL 1 advanced', res=False)
         ## Set 'offset' for scaling analog input 2
         self.send('SPA 2 0x02000200 %0.9f' % offset, res=False)
-        if self.verbose: print('Setting Z piezo analog offset to %s' % offset)
-        ## Return permssions to default
+        if self.verbose: print('Setting Z-piezo analog offset to %s'%offset)
+        ## Return permissions to default
         self.send('CCL 0', res=False)
         return None
     
     def _set_gain(self, gain=.5):
-        ## Requires special persmission for writing this parameter
+        ## Requires special permission for writing this parameter
         self.send('CCL 1 advanced', res=False)
         ## Set 'gain' for scaling analog input 2
-        self.send('SPA 2 0x02000300 %0.9f' % gain, res=False)
-        if self.verbose: print('Setting Z piezo analog offset to %s' % gain)
-        ## Return permssions to default
+        self.send('SPA 2 0x02000300 %0.9f'%gain, res=False)
+        if self.verbose: print('Setting Z-piezo analog offset to %s'%gain)
+        ## Return permissions to default
         self.send('CCL 0', res=False)
         return None
            
     def set_analog_control(self, analog_control=True):
+        if self.verbose: print('Setting Z-piezo analog input:', analog_control)
         self.analog_control = analog_control
-        ## Requires special persmission for writing this parameter
+        ## Requires special permission for writing this parameter
         self.send('CCL 1 advanced', res=False)
         if self.analog_control:
             self.send('SPA 1 0x06000500 2', res=False)
         else:
             self.send('SPA 1 0x06000500 0', res=False)            
-        if self.verbose:
-            print('Setting Z piezo analog control: %s' % analog_control)
-        ## Return permssions to default
+        ## Return permissions to default
         self.send('CCL 0', res=False)
+        return None
         
     def get_analog_control_state(self):
         analog_control_state = self.send('SPA? 1 0x06000500')[0].split('=')[1]
-        if analog_control_state == '2':
-            self.analog_control = True
-        else:
-            self.analog_control = False
+        self.analog_control = (analog_control_state == '2')
         return self.analog_control
-    
+##
+##    def record_analog_movement(self, record_types = [1, 2], t_resolution = 1):
+##        """ Use to record the piezos' response to an analog voltage
+##
+##
+##        args:
+##
+##        returns:
+##        """
+##        ## Input checcking
+##        assert len(record_types) <= 8 ## We only have 8 datatables
+##        record_types = [str(i) for i in record_types]
+##        assert ''.join(record_types).isdigit()
+##        ## Stop any waves that were currently playing
+##        if self.verbose:
+##            print('Preparing Z piezo to record movement from analog input')
+##        self.send('WGO 1 0', res=False)
+##        self.set_analog_control(False)
+##        ## Set up recording options
+##        self.send('CCL 1 advanced', res=False) #Up command set level
+##        ## Sets the number of tables
+##        self.send('SPA 1 0x16000300 %s' % len(record_types), res=False)
+##        self.send('CCL 0', res=False) # Return command level to  0
+##        ## Sets the record type for each table 
+##        for count, record in enumerate(record_types):
+##            if self.verbose:
+##                print(' Setting z piezo to record value type'
+##                      '%s on table %d' % (record, count+1)
+##            self.send('DRC %d 1 %s' (count+1, record), res=False)
+##        ## Set up wave generator used to trigger data recording.
+##        ## This should not affect piezo movement while in analog mode.
+##        self.set_analog_control(False) # turn off analog control to set up wave
+##        self.send('WSL 1 1', res=False) # attach a random wave from wave table
+##        self.send('WGO 1 2', res=False) # set up wave to run on TTL to I/O port
+##        self.set_analog_control(False) # return to analog control
+##        if self.verbose: print('Done... Z piezo is ready to record')
+##            
+##
+##    def retrieve_movement_log(self, rows = None, tables = None):
+##        pass
+                              
     def stop(self):
-        self.analog_control = False
-        self.send('STP', res = False)
-    
-    def close(self):
-        self.stop()
-        self.move(50)
-        self.port.close()
+        try:
+            self.send('STP', res=False)
+        except PIError as e:
+            if e.error_code != 10: raise
+        return None
         
+    def close(self):
+        if self.verbose: print('Z-piezo is shutting down!')
+        self.set_analog_control(False)
+        self.move(50)
+        self._finish_moving()
+        self.stop()
+        self.port.close()
+        return None
+        
+class PIError(Exception):
+    def __init__(self, value, error_code):
+        self.value = value
+        self.error_code = error_code
+    def __str__(self):
+        return str(self.value) + str(self.error_code)
+    
 if __name__ == '__main__':
 
     ##
     ## RemoteRefocus test code
     ##
     z_piezo = E753_Z_Piezo(which_port = 'COM6', verbose=True)
-    z_piezo.set_analog_control(True)
-    while True:
-        input('Hit enter to get real position')
-        print(z_piezo.get_real_position())
+    ## A few move tests
+##    z_piezo.move(10)
+##    z_piezo._finish_moving()
+##    z_piezo.get_real_position()
+##    z_piezo.move(40)
+##    z_piezo._finish_moving()
+##    z_piezo.get_real_position()
+##    z_piezo.move(60)
+##    z_piezo._finish_moving()
+##    z_piezo.get_real_position()
+    
+    ## Getting into data recorder
+    
+    ## Prints recording options (set with DRC below). The trigger options look
+    ## interesting, but I dont understand, or even find the documenation, on
+    ## how to use/set these.
+    z_piezo.send('HDR?')
+
+    ## Change number of recorder tables
+    z_piezo.send('CCL 1 advanced', res=False)
+    z_piezo.send('SPA 1 0x16000300 2', res=False) # Set to two data_tables
+    z_piezo.send('CCL 0', res=False)
+    z_piezo.send('RTR 100', res=False)
+    z_piezo.send('TNR?') # read what you changed?
+    
+    ## set the type of data to record, <table><source><option>
+    ## i dont understand how to get the input signal channel as a source
+    z_piezo.send('DRC?') # read
+    z_piezo.send('DRC 1 1 2', res=False) ## set
+    z_piezo.send('DRC 2 1 17', res=False) ## set
+    z_piezo.send('DRC?') # read new set values
+
+    
+##    ## Set up WGO to start on trigger (doesnt matter that WGO is running
+##    ## analog control will override wave-generator values. The trigger is
+##    ## supplied on IN2 (pin2 on I/O plug). We need to buy a cable so that
+##    ## we can send a TTL to this plug
+
+##    z_piezo.send('WSL 1 1', res = False) ## attach a random wave to generator 
+##    z_piezo.send('WGO 1 2') ## use for analog control, with TTL to trigger
+
+##    ## This block is just to start the wave generator with serial port commands
+##    ## we will want to use the TTL method above
+
+    z_piezo.send('WSL 1 1', res = False) ## attach a random wave to generator
+    z_piezo.send('WGO 1 1', res = False) ## start a random wave form
+    print('Piezo is moving for a few seconds...', end='')
+    time.sleep(5)          ## wait a bit 
+    z_piezo.send('WGO 1 0', res = False) ## stop this random wave form
+    print('Done')
+    
+##    ## Set analog control to true and you can start playing your voltages (and
+##    ## send the TTL). I think the set analog control must be set after WGO
+##    ## command
+    
+##    z_piezo.set_analog_control(True)
+
+    
+##    ## Once you are done playing voltages, read out the datatable
+    t0 = time.time()
+    z_piezo.verbose = False ## to see how much of the delay was from prints
+    data_table = z_piezo.send('DRR? 1 10 1 2') ## this takes a while...
+    print(time.time()-t0, 'to read from the port...')
+    z_piezo.verbose = True
+    z_piezo.close()
+    print(len(data_table))
+    
     ##
     ## Stage test code
     ##
