@@ -501,7 +501,7 @@ class E753_Z_Piezo:
             if self.verbose:
                 print(' Setting z-piezo to record value type',
                       '%s on table %d' % (record, count+1))
-            self.send('DRC %d 1 %s' (count+1, record), res=False)
+            self.send('DRC %d 1 %s' % (count+1, record), res=False)
         ## Set up wave generator used to trigger data recording.
         ## This should not affect piezo movement while in analog mode.
         self.send('WSL 1 1', res=False) # attach a random wave from wave table
@@ -514,15 +514,18 @@ class E753_Z_Piezo:
     def retrieve_data_log(self, rows = None, tables = [], starting_row = 1):
         verbose, self.verbose = self.verbose, False
         if verbose: 
-            print('Retrieving data log from Z-piezo...be patient...', end='')
+            print('Retrieving data log from Z-piezo...', end='')
+            if rows == None or rows > 1000:
+                print('be patient...', end='')
         for i in tables:
-            assert int(i) <= self.n_records # must be < number of tables you have
-        cmd_string = 'DRR? %d' % starting_row
-        if ' '.join(tables):
+            assert int(i) <= self.n_records #Must be < number of tables you have
+        tables = [str(i) for i in tables]
+        if ' '.join(tables) or rows:
+            assert ' '.join(tables) # must specify tables if # of rows specified
             assert rows # must have values here if you are asking for table
-            cmd_string += ' %d %s' % (rows, ' '.join(tables) )
-        elif rows:
-            cmd_string += ' %d' % rows
+            cmd_string = 'DRR? %d %d %s'%(starting_row, rows, ' '.join(tables))
+        else:
+            cmd_string = 'DRR?'
         data_log = self.send(cmd_string)
         self.verbose = verbose
         if self.verbose: print('done!')
