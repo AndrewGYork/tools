@@ -195,7 +195,7 @@ class C867_XY_Stage:
         if self.verbose: print("Setting stage precision...")
         # Our 'precision' parameters are bounded by other 'precision' parameters:
         dx_max, dy_max = [float(a.split('=')[1])
-                          for a in stage.send('SPA? 1 0x416 2 0x416')]
+                          for a in self.send('SPA? 1 0x416 2 0x416')]
         cmd_string_1 = ['SPA ']
         cmd_string_2 = ['SPA ']
         if dx is not None:
@@ -226,7 +226,7 @@ class C867_XY_Stage:
         if self.verbose: print(' ', end='', sep='')
         self.enable_joystick(True)
         dx, dy = [int(a.split('=')[1])
-                  for a in stage.send('SPA? 1 0x406 2 0x406')]
+                  for a in self.send('SPA? 1 0x406 2 0x406')]
         return dx, dy
     
     def _set_startup_macro(self):
@@ -309,6 +309,9 @@ class C867_XY_Stage:
 
 class E753_Z_Piezo:
     def __init__(self, which_port, verbose=True):
+        ## TODO P, I and notch_filter parameters to be set by init method.
+        ## Alfred has found values that allow 1-10 micron movements that will 
+        ## settle in ~ 10ms. 
         try:
             self.port = serial.Serial(
                 port=which_port, baudrate=115200, timeout=1)
@@ -460,46 +463,70 @@ class E753_Z_Piezo:
         analog_control_state = self.send('SPA? 1 0x06000500')[0].split('=')[1]
         self.analog_control = (analog_control_state == '2')
         return self.analog_control
-##
-##    def record_analog_movement(self, record_types = [1, 2], t_resolution = 1):
-##        """ Use to record the piezos' response to an analog voltage
-##
-##
-##        args:
-##
-##        returns:
-##        """
-##        ## Input checcking
-##        assert len(record_types) <= 8 ## We only have 8 datatables
-##        record_types = [str(i) for i in record_types]
-##        assert ''.join(record_types).isdigit()
-##        ## Stop any waves that were currently playing
-##        if self.verbose:
-##            print('Preparing Z piezo to record movement from analog input')
-##        self.send('WGO 1 0', res=False)
-##        self.set_analog_control(False)
-##        ## Set up recording options
-##        self.send('CCL 1 advanced', res=False) #Up command set level
-##        ## Sets the number of tables
-##        self.send('SPA 1 0x16000300 %s' % len(record_types), res=False)
-##        self.send('CCL 0', res=False) # Return command level to  0
-##        ## Sets the record type for each table 
-##        for count, record in enumerate(record_types):
-##            if self.verbose:
-##                print(' Setting z piezo to record value type'
-##                      '%s on table %d' % (record, count+1)
-##            self.send('DRC %d 1 %s' (count+1, record), res=False)
-##        ## Set up wave generator used to trigger data recording.
-##        ## This should not affect piezo movement while in analog mode.
-##        self.set_analog_control(False) # turn off analog control to set up wave
-##        self.send('WSL 1 1', res=False) # attach a random wave from wave table
-##        self.send('WGO 1 2', res=False) # set up wave to run on TTL to I/O port
-##        self.set_analog_control(False) # return to analog control
-##        if self.verbose: print('Done... Z piezo is ready to record')
-##            
-##
-##    def retrieve_movement_log(self, rows = None, tables = None):
-##        pass
+
+    def record_analog_movement(self, record_types = [1, 2], t_resolution = 1):
+        """ Use to record the piezo's response to an analog voltage
+
+
+        args:
+            record_types -- List of ints that correspond to the appropriate
+                            codes of record types. Use 'HDR?' command to 
+                            retrieve a list of possible codes
+            
+            t_resolution -- int between 1 and 10000. Corresponds to the 
+                            frequency at which a measurement is recorded. Units
+                            are processor cycles (40 microseconds).
+
+        returns:
+            None
+        """
+        ## Input checking
+        assert len(record_types) <= 8 ## We only have 8 datatables
+        record_types = [str(i) for i in record_types]
+        assert ''.join(record_types).isdigit()
+        if self.verbose:
+            print('Preparing Z piezo to record movement from analog input')
+        ## Stop any waves that were currently playing
+        self.send('WGO 1 0', res=False)
+        self.set_analog_control(False) ## Set to false for setup
+        ## Set up recording options
+        self.send('RTR %d' % t_resolution, res=False)
+        self.send('CCL 1 advanced', res=False) #Up command set level
+        ## Sets the number of tables
+        self.send('SPA 1 0x16000300 %s' % len(record_types), res=False)
+        self.n_records = len(record_types)
+        self.send('CCL 0', res=False) # Return command level to  0
+        ## Sets the record type for each table 
+        for count, record in enumerate(record_types):
+            if self.verbose:
+                print(' Setting z-piezo to record value type',
+                      '%s on table %d' % (record, count+1))
+            self.send('DRC %d 1 %s' (count+1, record), res=False)
+        ## Set up wave generator used to trigger data recording.
+        ## This should not affect piezo movement while in analog mode.
+        self.send('WSL 1 1', res=False) # attach a random wave from wave table
+        self.send('WGO 1 2', res=False) # set up wave to run on TTL to I/O port
+        self.set_analog_control(True) # return to analog control
+        if self.verbose: 
+            print('Done... Z-piezo is ready to record triggered movement')
+        return None
+    
+    def retrieve_data_log(self, rows = None, tables = [], starting_row = 1):
+        verbose, self.verbose = self.verbose, False
+        if verbose: 
+            print('Retrieving data log from Z-piezo...be patient...', end='')
+        for i in tables:
+            assert int(i) <= self.n_records # must be < number of tables you have
+        cmd_string = 'DRR? %d' % starting_row
+        if ' '.join(tables):
+            assert rows # must have values here if you are asking for table
+            cmd_string += ' %d %s' % (rows, ' '.join(tables) )
+        elif rows:
+            cmd_string += ' %d' % rows
+        data_log = self.send(cmd_string)
+        self.verbose = verbose
+        if self.verbose: print('done!')
+        return data_log
                               
     def stop(self):
         try:
@@ -531,72 +558,19 @@ if __name__ == '__main__':
     ##
     z_piezo = E753_Z_Piezo(which_port = 'COM6', verbose=True)
     ## A few move tests
-##    z_piezo.move(10)
-##    z_piezo._finish_moving()
-##    z_piezo.get_real_position()
-##    z_piezo.move(40)
-##    z_piezo._finish_moving()
-##    z_piezo.get_real_position()
-##    z_piezo.move(60)
-##    z_piezo._finish_moving()
-##    z_piezo.get_real_position()
+    z_piezo.move(10)
+    z_piezo._finish_moving()
+    z_piezo.get_real_position()
+    z_piezo.move(50)
+    z_piezo._finish_moving()
+    ## 
+#     z_piezo.record_analog_movement(record_types=[1, 2],
+#                                    t_resolution=10)
+#     z_piezo.retrieve_data_log(rows = 300, 
+#                               tables = [1, 2])
     
-    ## Getting into data recorder
     
-    ## Prints recording options (set with DRC below). The trigger options look
-    ## interesting, but I dont understand, or even find the documenation, on
-    ## how to use/set these.
-    z_piezo.send('HDR?')
 
-    ## Change number of recorder tables
-    z_piezo.send('CCL 1 advanced', res=False)
-    z_piezo.send('SPA 1 0x16000300 2', res=False) # Set to two data_tables
-    z_piezo.send('CCL 0', res=False)
-    z_piezo.send('RTR 100', res=False)
-    z_piezo.send('TNR?') # read what you changed?
-    
-    ## set the type of data to record, <table><source><option>
-    ## i dont understand how to get the input signal channel as a source
-    z_piezo.send('DRC?') # read
-    z_piezo.send('DRC 1 1 2', res=False) ## set
-    z_piezo.send('DRC 2 1 17', res=False) ## set
-    z_piezo.send('DRC?') # read new set values
-
-    
-##    ## Set up WGO to start on trigger (doesnt matter that WGO is running
-##    ## analog control will override wave-generator values. The trigger is
-##    ## supplied on IN2 (pin2 on I/O plug). We need to buy a cable so that
-##    ## we can send a TTL to this plug
-
-##    z_piezo.send('WSL 1 1', res = False) ## attach a random wave to generator 
-##    z_piezo.send('WGO 1 2') ## use for analog control, with TTL to trigger
-
-##    ## This block is just to start the wave generator with serial port commands
-##    ## we will want to use the TTL method above
-
-    z_piezo.send('WSL 1 1', res = False) ## attach a random wave to generator
-    z_piezo.send('WGO 1 1', res = False) ## start a random wave form
-    print('Piezo is moving for a few seconds...', end='')
-    time.sleep(5)          ## wait a bit 
-    z_piezo.send('WGO 1 0', res = False) ## stop this random wave form
-    print('Done')
-    
-##    ## Set analog control to true and you can start playing your voltages (and
-##    ## send the TTL). I think the set analog control must be set after WGO
-##    ## command
-    
-##    z_piezo.set_analog_control(True)
-
-    
-##    ## Once you are done playing voltages, read out the datatable
-    t0 = time.time()
-    z_piezo.verbose = False ## to see how much of the delay was from prints
-    data_table = z_piezo.send('DRR? 1 10 1 2') ## this takes a while...
-    print(time.time()-t0, 'to read from the port...')
-    z_piezo.verbose = True
-    z_piezo.close()
-    print(len(data_table))
-    
     ##
     ## Stage test code
     ##
