@@ -337,8 +337,7 @@ class E753_Z_Piezo:
         self._set_closed_loop_control_parameters(
             p_term=.09, i_term=.000166, notch1_freq=480.0, notch2_freq=520.0,
             notch1_rej=.050, notch2_rej=.050, slew_rate=2.5e6)
-        self.send('SVO 1 1', res=False) # Ensure we're in closed-loop servo mode
-        self.closed_loop = (self.send('SVO? 1')[0].split('=')[1] == '1')
+        self.set_closed_loop()
         self.verbose = verbose
         if self.verbose:
             print(".done!")
@@ -425,13 +424,36 @@ class E753_Z_Piezo:
             print('Setting Z-piezo analog gain to %s'%gain)
         # Return permissions to default
         self.send('CCL 0', res=False)
+        self.analog_offset, self.analog_gain = offset, gain
+        return None
+
+    def set_closed_loop(self, closed_loop=True):
+        if self.verbose: print('Setting closed loop to:', closed_loop)
+        if closed_loop:
+            self.send('SVO 1 1', res=False)
+        else:
+            self.send('SVO 1 0', res=False)
+        self.closed_loop = (self.send('SVO? 1')[0].split('=')[1] == '1')
+        assert self.closed_loop == closed_loop
+        if (abs(self.analog_offset - 50.0) > 1e-5 or
+            abs(self.analog_gain - 0.5) > 1e-5):
+            self._set_offset_and_gain()
         return None
            
     def set_analog_control_state(self, analog_control=True):
+        if hasattr(self, 'analog_control'):
+            if analog_control == self.analog_control: return None
         if self.verbose: print('Setting Z-piezo analog input:', analog_control)
         self.analog_control = analog_control
-        # Requires special permission for writing this parameter
+        # Requires special permission for writing these parameters
         self.send('CCL 1 advanced', res=False)
+        if self.analog_control and not self.closed_loop:
+            # Change the analog offset so that the current input voltage
+            # will 'target' the current position
+            target = float(self.send('SVA?')[0].split('=')[1])
+            voltage = float(self.send('TSP? 2')[0].split('=')[1])
+            self.analog_offset = self.analog_offset + (target - voltage)
+            self.send('SPA 2 0x02000200 %0.9f'%self.analog_offset, res=False)
         if self.analog_control:
             self.send('SPA 1 0x06000500 2', res=False)
         else:
@@ -441,7 +463,7 @@ class E753_Z_Piezo:
         self.send('CCL 0', res=False)
         return None
 
-    def record_analog_movement(self, record_types=(1, 2), t_resolution=1):
+    def record_analog_movement(self, record_types=(2,), t_resolution=1):
         """Prepares tecord the piezo's response to an analog voltage.
 
         Note that you must trigger the piezo controller recording via a
@@ -462,22 +484,21 @@ class E753_Z_Piezo:
             None
         """
         assert 0 < len(record_types) <= 8 # We only have 8 datatables
-        record_types = [str(i) for i in record_types]
-        assert ''.join(record_types).isdigit()
+        assert ''.join([str(i) for i in record_types]).isdigit()
+        self.record_types = record_types
         if self.verbose: print('Preparing Z piezo to record movement...')
         self.set_analog_control_state(False) # Disable for setup
         self.send('RTR %d'%t_resolution, res=False) # Set time resolution 
         # Set the number of tables
         self.send('CCL 1 advanced', res=False) # Mother, may I?
-        self.send('SPA 1 0x16000300 %d'%len(record_types), res=False)
-        self.num_records = len(record_types)
+        self.send('SPA 1 0x16000300 %d'%len(self.record_types), res=False)
         self.send('CCL 0', res=False) # Return command level to  0
         # Set the record type for each table
-        for which_table, record in enumerate(record_types):
+        for which_table, record in enumerate(self.record_types):
             if self.verbose:
                 print(' Setting z-piezo to record value type',
-                      '%s on table %d' % (record, which_table+1))
-            self.send('DRC %d 1 %s' % (which_table+1, record), res=False)
+                      '%d on table %d' % (record, which_table+1))
+            self.send('DRC %d 1 %d' % (which_table+1, record), res=False)
         # Set up wave generator, just to trigger data recording.
         # This won't affect piezo movement because we'll be in analog mode.
         self.send('WSL 1 1', res=False) # attach a random wave from wave table
@@ -486,7 +507,7 @@ class E753_Z_Piezo:
         if self.verbose: print('Done. Z-piezo is ready to record movement')
         return None
     
-    def retrieve_data_log(self, rows=None, tables=(), starting_row=1):
+    def retrieve_data_log(self, rows, record_types=None, starting_row=1):
         """By default this reads the whole record, which can be sloooow.
 
         You can use the arguments to only read portions of the record.
@@ -494,17 +515,16 @@ class E753_Z_Piezo:
         verbose, self.verbose = self.verbose, False # Clam up, this is spammy
         if verbose: 
             print('Retrieving data log from Z-piezo...', end='')
-            if rows == None or rows > 1000: print(' (be patient)', end='')
-        for i in tables:
-            assert int(i) <= self.num_records # Must refer to existing tables
-        tables = [str(i) for i in tables]
-        if (len(tables) > 0) or (rows is not None):
-            assert (len(tables) > 0) and rows is not None # 
-            cmd_string = 'DRR? %d %d %s'%(starting_row, rows, ' '.join(tables))
+            if rows > 1000: print(' (be patient)', end='')
+        if record_types is None:
+            tables = range(1, len(self.record_types) + 1)
         else:
-            cmd_string = 'DRR?'
+            tables = [self.record_types.index(r) + 1 for r in record_types]
+        assert 0 < rows * len(self.record_types) < 2**16
+        cmd_string = 'DRR? %d %d %s'%(
+            starting_row, rows, ' '.join([str(i) for i in tables]))
         data_log = self.send(cmd_string)
-        # Dirty parsing of data_table
+        # Parsing of data_table
         data = []
         for i in data_log:
             if not i.startswith("#"):
@@ -512,11 +532,11 @@ class E753_Z_Piezo:
             else:
                 if 'SAMPLE_TIME' in i: ## grab the time interval
                     time_step = float(i.split()[3])
-        position = np.asarray(data)
-        time = time_step * 1000 * np.arange(position.shape[0])
+        position_um = np.asarray(data) # Microns (for most but not all outputs!)
+        time_s = time_step * np.arange(position_um.shape[0]) # Seconds
         self.verbose = verbose
         if self.verbose: print(' done!')
-        return position, time
+        return position_um, time_s
 
     def _set_closed_loop_control_parameters(
         self,
@@ -561,7 +581,9 @@ class E753_Z_Piezo:
         
     def close(self):
         if self.verbose: print('Z-piezo is shutting down!')
+        # Leave the piezo in closed-loop, non-analog control
         self.set_analog_control_state(False)
+        self.set_closed_loop()
         self.move(50)
         if self.closed_loop: self._finish_moving()
         self.stop()
