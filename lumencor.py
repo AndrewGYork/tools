@@ -113,6 +113,9 @@ class SpectraX:
         """
         assert 0 <= intensity <= 255
         color = led.lower()
+        if self.verbose:
+            print("Setting SpectraX %s intensity to %i / 255" % (color, 
+                  intensity))
         self._send(({
             'blue':b'\x53\x1a\x03\x01',
             'teal':b'\x53\x1a\x03\x02',
@@ -121,9 +124,6 @@ class SpectraX:
             'green':b'\x53\x18\x03\x04',
             'red':b'\x53\x18\x03\x08'}[color]+
                     (((4095-intensity) << 12)+80).to_bytes(3,byteorder='big')))
-        if self.verbose:
-            print("Setting SpectraX %s intensity to %i / 255" % (color, 
-                  intensity))
         if blocking:
             self._force_response()        
         
@@ -203,10 +203,16 @@ class SpectraX:
         self._send(self._state_cmd_generator())
         if blocking:
             self._force_response()
+
+    def close(self):
+        self.set_led_state(red=False, green=False, cyan=False, uv=False,
+                           blue=False, teal=False)
+        self.set_intensity(red=0, green=0, cyan=0, uv=0, blue=0, teal=0)
+        self.port.close()
             
 if __name__ == '__main__':
     import time
-    spectrax = SpectraX('COM6', verbose=False)
+    spectrax = SpectraX('COM8', verbose=False)
     print("Done initializing...")
     spectrax.set_intensity(red=255,
                            blocking=True)
