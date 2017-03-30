@@ -23,7 +23,7 @@ class SpectraX:
         if self.verbose: print("SpectraX initializing...")
         ## Write initial 'must be issued' commands to the port
         self._send(b'\x57\x02\xff\x50')
-        self._send(b'\x57\x02\xff\x50')
+        self._send(b'\x57\x03\xAB\x50')
         ## Set initial led intensities to 0 and ensure SpextraX is responding
         self.set_intensity(blocking=False, **self.led_intensities)
         self._force_response()
@@ -117,12 +117,12 @@ class SpectraX:
             print("Setting SpectraX %s intensity to %i / 255" % (color, 
                   intensity))
         self._send(({
-            'blue':b'\x53\x1a\x03\x01',
-            'teal':b'\x53\x1a\x03\x02',
-            'uv':b'\x53\x18\x03\x01',
-            'cyan':b'\x53\x18\x03\x02',
+            'blue': b'\x53\x1a\x03\x01',
+            'teal': b'\x53\x1a\x03\x02',
+            'uv':   b'\x53\x18\x03\x01',
+            'cyan': b'\x53\x18\x03\x02',
             'green':b'\x53\x18\x03\x04',
-            'red':b'\x53\x18\x03\x08'}[color]+
+            'red':  b'\x53\x18\x03\x08'}[color]+
                     (((4095-intensity) << 12)+80).to_bytes(3,byteorder='big')))
         if blocking:
             self._force_response()        
