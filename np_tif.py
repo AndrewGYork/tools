@@ -108,6 +108,7 @@ def array_to_tif(
     channels=None,
     verbose=False,
     coerce_64bit_to_32bit=True,
+    backup_filename=None,
     ):
     """Save a numpy array as a TIF
 
@@ -171,22 +172,33 @@ def array_to_tif(
     """
     We have all our ducks in a row, time to actually write the TIF:
     """
-    with open(filename, 'wb') as f:
-        f.write(b'II*\x00\x08\x00\x00\x00') #Little tif, turn to page 8
-        ifd.bytes.tofile(f)
-        f.write(image_description)
-        if dtype != x.dtype: # We have to coerce to a different dtype
-            for z in range(x.shape[0]): #Convert one at a time to save memory
-                x[z, :, :].astype(dtype).tofile(f)
-        else:
-            x.tofile(f)
-        for which_header in range(1, x.shape[0]):
-            if which_header == x.shape[0] - 1:
-                ifd.next_ifd_offset[0] = 0
+    for fn in (filename, backup_filename):
+        try:
+            with open(fn, 'wb') as f:
+                f.write(b'II*\x00\x08\x00\x00\x00') #Little tif, turn to page 8
+                ifd.bytes.tofile(f)
+                f.write(image_description)
+                if dtype != x.dtype: # We have to coerce to a different dtype
+                    for z in range(x.shape[0]): #Convert one at a time (memory)
+                        x[z, :, :].astype(dtype).tofile(f)
+                else:
+                    x.tofile(f)
+                for which_header in range(1, x.shape[0]):
+                    if which_header == x.shape[0] - 1:
+                        ifd.next_ifd_offset[0] = 0
+                    else:
+                        ifd.next_ifd_offset[0] += ifd.bytes.nbytes
+                    ifd.strip_offsets[0] += ifd.strip_byte_counts[0]
+                    ifd.bytes.tofile(f)
+            break 
+        except Exception as e:
+            print("np_tif.array_to_tif failed to save:")
+            print(fn)
+            print(" with error:", repr(e))
+            if backup_filename is not None and fn!=backup_filename:
+                continue
             else:
-                ifd.next_ifd_offset[0] += ifd.bytes.nbytes
-            ifd.strip_offsets[0] += ifd.strip_byte_counts[0]
-            ifd.bytes.tofile(f)
+                raise
     return None
 
 def parse_tif(
@@ -435,6 +447,8 @@ if __name__ == '__main__':
     """
     Simple tests, not comprehensive.
     """
+    import os
+    
     for a in (
         np.random.random_sample((30, 432, 500)),
         np.random.random_sample((3, 432, 500)),
@@ -449,6 +463,10 @@ if __name__ == '__main__':
         print("To disk:", a.shape, a.dtype, a.min(), a.max())
         print("From disk", b.shape, b.dtype, b.min(), b.max())
         assert np.all(np.isclose(a, b))
+    array_to_tif(a, os.path.join(os.getcwd(),
+                                 'this_folder_does_not_exist',
+                                 'test.tif'),
+                 backup_filename='test.tif')
         
 
 
