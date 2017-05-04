@@ -553,113 +553,124 @@ class Edge:
         return self.roi
 
     def _legalize_roi(self, roi):
-        """
-        There are lots of ways a requested region of interest (ROI) can
-        be illegal. This utility function returns a nearby legal ROI.
+        """This just calls the _legalize_roi function defined below.
 
-        Optionally, you can leave keys of 'roi' unspecified, and
-        _legalize_roi() tries to return reasonable choices based on
-        the current values in self.roi
+        Note that this method fills in some of the arguments for you.
         """
-        left = roi.get('left')
-        right = roi.get('right')
-        bottom = roi.get('bottom')
-        top = roi.get('top')
-        if self.verbose:
-            print(" Requested camera ROI:")
-            print("  From pixel", left, "to pixel", right, "(left/right)")
-            print("  From pixel", top, "to pixel", bottom, "(up/down)")
-        min_lr, min_ud, min_height = 1, 1, 10
-        if self.pco_edge_type == '4.2':
-            max_lr, max_ud, min_width, step_lr = 2060, 2048, 40, 20
-        elif self.pco_edge_type == '5.5':
-            max_lr, max_ud, min_width, step_lr = 2560, 2160, 160, 160
-        """
-        Legalize left/right
-        """
-        if left is None and right is None:
-            """
-            User isn't trying to change l/r ROI; use existing ROI.
-            """
-            left, right = self.roi['left'], self.roi['right']
-        elif left is not None:
-            """
-            'left' is specified, 'left' is the master.
-            """
-            if left < min_lr: #Legalize 'left'
-                left = min_lr
-            elif left > max_lr - min_width + 1:
-                left = max_lr - min_width + 1
-            else:
-                left = 1 + step_lr*((left - 1) // step_lr)
-            if right is None: #Now legalize 'right'
-                right = self.roi['right']
-            if right < left + min_width - 1:
-                right = left + min_width - 1
-            elif right > max_lr:
-                right = max_lr
-            else:
-                right = left - 1 + step_lr*((right - (left - 1)) // step_lr)
-        else:
-            """
-            'left' is unspecified, 'right' is specified. 'right' is the master.
-            """
-            if right > max_lr: #Legalize 'right'
-                right = max_lr
-            elif right < min_lr - 1 + min_width:
-                right = min_width
-            else:
-                right = step_lr * (right  // step_lr)
-            left = self.roi['left'] #Now legalize 'left'
-            if left > right - min_width + 1:
-                left = right - min_width + 1
-            elif left < min_lr:
-                left = min_lr
-            else:
-                left = right + 1 - step_lr * ((right - (left - 1)) // step_lr)
-        assert min_lr <= left < left + min_width - 1 <= right <= max_lr
-        """
-        Legalize top/bottom
-        """
-        if top is None and bottom is None:
-            """
-            User isn't trying to change u/d ROI; use existing ROI.
-            """
-            top, bottom = self.roi['top'], self.roi['bottom']
-        elif top is not None:
-            """
-            'top' is specified, 'top' is the master.
-            """
-            if top < min_ud: #Legalize 'top'
-                top = min_ud
-            if top > (max_ud - min_height)//2 + 1:
-                top = (max_ud - min_height)//2 + 1
-            bottom = max_ud - top + 1 #Now bottom is specified
-        else:
-            """
-            'top' is unspecified, 'bottom' is specified, 'bottom' is the
-            master.
-            """
-            if bottom > max_ud: #Legalize 'bottom'
-                bottom = max_ud
-            if bottom < (max_ud + min_height)//2:
-                bottom = (max_ud + min_height)//2
-            top = max_ud - bottom + 1 #Now 'top' is specified
-        assert min_ud <= top < top + min_height - 1 <= bottom <= max_ud
-        new_roi = {'left': left,
-                   'top': top,
-                   'right': right,
-                   'bottom': bottom}
-        if self.verbose and new_roi != roi:
-            print(" ***Requested ROI must be adjusted to match the camera***")
-        return new_roi
-
+        return legalize_roi(roi, self.pco_edge_type, self.roi, self.verbose)
+    
     def _set_roi(self, region_of_interest):
         roi = self._legalize_roi(region_of_interest)
         dll.set_roi(self.camera_handle,
                     roi['left'], roi['top'], roi['right'], roi['bottom'])
         assert self._get_roi() == roi
         return self.roi
+
+def legalize_roi(
+    roi,
+    pco_edge_type='4.2',
+    current_roi=None,
+    verbose=True):
+    """
+    There are lots of ways a requested region of interest (ROI) can
+    be illegal. This utility function returns a nearby legal ROI.
+
+    Optionally, you can leave keys of 'roi' unspecified, and
+    _legalize_roi() tries to return reasonable choices based on
+    the values in current_roi.
+    """
+    left = roi.get('left')
+    right = roi.get('right')
+    bottom = roi.get('bottom')
+    top = roi.get('top')
+    if verbose:
+        print(" Requested camera ROI:")
+        print("  From pixel", left, "to pixel", right, "(left/right)")
+        print("  From pixel", top, "to pixel", bottom, "(up/down)")
+    min_lr, min_ud, min_height = 1, 1, 10
+    if pco_edge_type == '4.2':
+        max_lr, max_ud, min_width, step_lr = 2060, 2048, 40, 20
+    elif pco_edge_type == '5.5':
+        max_lr, max_ud, min_width, step_lr = 2560, 2160, 160, 160
+    if current_roi is None:
+        current_roi = {'left': min_lr, 'right':  max_lr,
+                       'top':  min_ud, 'bottom': max_ud}
+    """
+    Legalize left/right
+    """
+    if left is None and right is None:
+        """
+        User isn't trying to change l/r ROI; use existing ROI.
+        """
+        left, right = current_roi['left'], current_roi['right']
+    elif left is not None:
+        """
+        'left' is specified, 'left' is the master.
+        """
+        if left < min_lr: #Legalize 'left'
+            left = min_lr
+        elif left > max_lr - min_width + 1:
+            left = max_lr - min_width + 1
+        else:
+            left = 1 + step_lr*((left - 1) // step_lr)
+        if right is None: #Now legalize 'right'
+            right = current_roi['right']
+        if right < left + min_width - 1:
+            right = left + min_width - 1
+        elif right > max_lr:
+            right = max_lr
+        else:
+            right = left - 1 + step_lr*((right - (left - 1)) // step_lr)
+    else:
+        """
+        'left' is unspecified, 'right' is specified. 'right' is the master.
+        """
+        if right > max_lr: #Legalize 'right'
+            right = max_lr
+        elif right < min_lr - 1 + min_width:
+            right = min_width
+        else:
+            right = step_lr * (right  // step_lr)
+        left = current_roi['left'] #Now legalize 'left'
+        if left > right - min_width + 1:
+            left = right - min_width + 1
+        elif left < min_lr:
+            left = min_lr
+        else:
+            left = right + 1 - step_lr * ((right - (left - 1)) // step_lr)
+    assert min_lr <= left < left + min_width - 1 <= right <= max_lr
+    """
+    Legalize top/bottom
+    """
+    if top is None and bottom is None:
+        """
+        User isn't trying to change u/d ROI; use existing ROI.
+        """
+        top, bottom = current_roi['top'], current_roi['bottom']
+    elif top is not None:
+        """
+        'top' is specified, 'top' is the master.
+        """
+        if top < min_ud: #Legalize 'top'
+            top = min_ud
+        if top > (max_ud - min_height)//2 + 1:
+            top = (max_ud - min_height)//2 + 1
+        bottom = max_ud - top + 1 #Now bottom is specified
+    else:
+        """
+        'top' is unspecified, 'bottom' is specified, 'bottom' is the
+        master.
+        """
+        if bottom > max_ud: #Legalize 'bottom'
+            bottom = max_ud
+        if bottom < (max_ud + min_height)//2:
+            bottom = (max_ud + min_height)//2
+        top = max_ud - bottom + 1 #Now 'top' is specified
+    assert min_ud <= top < top + min_height - 1 <= bottom <= max_ud
+    new_roi = {'left': left, 'top': top, 'right': right, 'bottom': bottom}
+    if verbose and new_roi != roi:
+        print(" ***Requested ROI must be adjusted to match the camera***")
+    return new_roi
 
 def pco_edge_camera_child_process(
     data_buffers,
