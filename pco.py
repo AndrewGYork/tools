@@ -419,8 +419,8 @@ class Edge:
         assert self.trigger_mode in ('software_trigger', 'external_trigger')
         wTriggerMode = C.c_uint16()
         dll.force_trigger(self.camera_handle, wTriggerMode)
-        assert wTriggerMode.value in (1, 2) # Same as above
-        return None
+        assert wTriggerMode.value in (0, 1)
+        return bool(wTriggerMode.value)
 
     def _get_storage_mode(self):
         wStorageMode = C.c_uint16()
