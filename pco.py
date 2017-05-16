@@ -90,7 +90,7 @@ class Edge:
             if self.verbose:
                 print('Arm requested, but the pco.edge camera'
                       'is already armed. Disarming...')
-                self.disarm()
+            self.disarm()
         if self.verbose: print("Arming camera...") 
         dll.arm_camera(self.camera_handle)
         wXRes, wYRes, wXResMax, wYResMax = (
@@ -250,7 +250,8 @@ class Edge:
                     pass
                 elif self._driver_status.value == 0x80332028:
                     # Zero the rest of the buffer
-                    out[max(0, first_frame + (which_im - preframes)):, :, :].fill(0)
+                    out[max(0, first_frame + (which_im - preframes)):, :, :
+                        ].fill(0)
                     raise DMAError('DMA error during record_to_memory')
                 else:
                     print("Driver status:", self._driver_status.value)
@@ -413,6 +414,13 @@ class Edge:
         dll.set_trigger_mode(self.camera_handle, trigger_mode_numbers[mode])
         assert self._get_trigger_mode() == mode
         return self.trigger_mode
+
+    def _force_trigger(self):
+        assert self.trigger_mode in ('software_trigger', 'external_trigger')
+        wTriggerMode = C.c_uint16()
+        dll.force_trigger(self.camera_handle, wTriggerMode)
+        assert wTriggerMode.value in (1, 2) # Same as above
+        return None
 
     def _get_storage_mode(self):
         wStorageMode = C.c_uint16()
@@ -733,6 +741,9 @@ def pco_edge_camera_child_process(
                 first_trigger_timeout_seconds = args[
                     'first_trigger_timeout_seconds']
                 commands.send(first_trigger_timeout_seconds)
+            elif cmd == 'force_trigger':
+                result = camera._force_trigger()
+                commands.send(result)
             else:
                 info("Unrecognized command: " + cmd)
                 commands.send("unrecognized_command")
@@ -947,6 +958,9 @@ dll.set_sensor_format.argtypes = [C.c_void_p, C.c_uint16]
 
 dll.set_trigger_mode = dll.PCO_SetTriggerMode
 dll.set_trigger_mode.argtypes = [C.c_void_p, C.c_uint16]
+
+dll.force_trigger = dll.PCO_ForceTrigger
+dll.force_trigger.argtypes = [C.c_void_p, C.POINTER(C.c_uint16)]
 
 dll.set_recorder_submode = dll.PCO_SetRecorderSubmode
 dll.set_recorder_submode.argtypes = [C.c_void_p, C.c_uint16]
