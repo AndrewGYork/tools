@@ -106,6 +106,7 @@ def array_to_tif(
     filename,
     slices=None,
     channels=None,
+    frames=None,
     verbose=False,
     coerce_64bit_to_32bit=True,
     backup_filename=None,
@@ -149,7 +150,14 @@ def array_to_tif(
                                 x.shape[2] *
                                 ifd.bits_per_sample[0] // 8)
 
-    if slices is not None and channels is not None:
+    if slices is not None and channels is not None and frames is not None:
+        assert slices * channels * frames == x.shape[0]
+        image_description = bytes(''.join((
+            'ImageJ=1.48e\nimages=%i\nchannels=%i\n'%(x.shape[0], channels),
+            'slices=%i\nframes=%i\nhyperstack=true\n'%(slices, frames),
+            'mode=grayscale\nloop=false\nmin=%0.3f\nmax=%0.3f\n\x00'%(
+                x.min(), x.max()))), encoding='ascii')        
+    elif slices is not None and channels is not None and frames is None:
         assert slices * channels == x.shape[0]
         image_description = bytes(''.join((
             'ImageJ=1.48e\nimages=%i\nchannels=%i\n'%(x.shape[0], channels),
