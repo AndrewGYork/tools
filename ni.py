@@ -45,10 +45,10 @@ class Analog_Out:
         self.verbose = verbose
 
         if self.verbose: print("Opening analog-out board...")
-        self.ao_task_handle = C.c_uint32(0)
+        self.ao_task_handle = C.c_void_p(0)
         check(api.create_task(bytes(), self.ao_task_handle))
         if self.num_digital_lines > 0:
-            self.do_task_handle = C.c_uint32(0)
+            self.do_task_handle = C.c_void_p(0)
             check(api.create_task(bytes(), self.do_task_handle))
         # If I were a real man, I would automatically detect the proper
         # board name somehow
@@ -258,11 +258,11 @@ api.get_error_info = api.DAQmxGetExtendedErrorInfo
 api.get_error_info.argtypes = [C.c_char_p, C.c_uint32]
 
 api.create_task = api.DAQmxCreateTask
-api.create_task.argtypes = [C.c_char_p, C.POINTER(C.c_uint32)]
+api.create_task.argtypes = [C.c_char_p, C.POINTER(C.c_void_p)]
 
 api.create_ao_voltage_channel = api.DAQmxCreateAOVoltageChan
 api.create_ao_voltage_channel.argtypes = [
-    C.c_uint32,
+    C.c_void_p,
     C.c_char_p,
     C.c_char_p,
     C.c_double,
@@ -272,14 +272,14 @@ api.create_ao_voltage_channel.argtypes = [
 
 api.create_do_channel = api.DAQmxCreateDOChan
 api.create_do_channel.argtypes = [
-    C.c_uint32,
+    C.c_void_p,
     C.c_char_p,
     C.c_char_p,
     C.c_int32]
 
 api.clock_timing = api.DAQmxCfgSampClkTiming
 api.clock_timing.argtypes = [
-    C.c_uint32,
+    C.c_void_p,
     C.c_char_p,
     C.c_double,
     C.c_int32,
@@ -288,7 +288,7 @@ api.clock_timing.argtypes = [
 
 api.write_voltages = api.DAQmxWriteAnalogF64
 api.write_voltages.argtypes = [
-    C.c_uint32,
+    C.c_void_p,
     C.c_int32,
     C.c_uint32, #NI calls this a 'bool32' haha awesome
     C.c_double,
@@ -299,7 +299,7 @@ api.write_voltages.argtypes = [
 
 api.write_digits = api.DAQmxWriteDigitalLines
 api.write_digits.argtypes = [
-    C.c_uint32,
+    C.c_void_p,
     C.c_int32,
     C.c_uint32, #NI calls this a 'bool32' haha awesome
     C.c_double,
@@ -309,16 +309,16 @@ api.write_digits.argtypes = [
     C.POINTER(C.c_uint32)]
 
 api.start_task = api.DAQmxStartTask
-api.start_task.argtypes = [C.c_uint32]
+api.start_task.argtypes = [C.c_void_p]
 
 api.finish_task = api.DAQmxWaitUntilTaskDone
-api.finish_task.argtypes = [C.c_uint32, C.c_double]
+api.finish_task.argtypes = [C.c_void_p, C.c_double]
 
 api.stop_task = api.DAQmxStopTask
-api.stop_task.argtypes = [C.c_uint32]
+api.stop_task.argtypes = [C.c_void_p]
 
 api.clear_task = api.DAQmxClearTask
-api.clear_task.argtypes = [C.c_uint32]
+api.clear_task.argtypes = [C.c_void_p]
 
 def check(error_code):
     if error_code != 0:
