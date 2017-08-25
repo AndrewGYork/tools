@@ -16,40 +16,46 @@ class Analog_Out:
     def __init__(
         self,
         num_channels='all',
-        num_digital_lines=0,
         rate=1e4,
         verbose=True,
         daq_type='6733',
-        board_name='Dev1' # Also popular: 'cDAQ1Mod1'
+        board_name='Dev1', # Also popular: 'cDAQ1Mod1'
+        clock_name=None,
         ):
         """Play analog voltages via a National Instruments analog-out DAQ board.
 
         So far, I've only tested this for the PCI 6733 and the NI 9263.
         """
-        assert daq_type in ('6733', '9263')
+        assert daq_type in ('6733', '6733_digital', '9263', '9401')
         self.daq_type = daq_type
         if self.daq_type == '6733':
             self.max_channels = 8
-            self.max_digital_lines = 8
             self.max_rate = 1e6
+            self.channel_type = 'analog'
+        elif self.daq_type =='6733_digital':
+            self.max_channels = 8
+            self.max_rate = 1e6
+            self.channel_type = 'digital'
         elif self.daq_type == '9263':
             self.max_channels = 4
-            self.max_digital_lines = 0
             self.max_rate = 1e5
+            self.channel_type = 'analog'
+        elif self.daq_type == '9401':
+            self.max_channels = 8
+            self.max_rate = 8e7
+            self.channel_type = 'digital'
         if num_channels == 'all':
             num_channels = self.max_channels
         assert 1 <= num_channels <= self.max_channels
         self.num_channels = num_channels
-        assert 0 <= num_digital_lines <= self.max_digital_lines
-        self.num_digital_lines = num_digital_lines
+        if clock_name is not None:
+            assert isinstance(clock_name, str)
+            clock_name = bytes(clock_name, 'ascii')
         self.verbose = verbose
-
-        if self.verbose: print("Opening analog-out board...")
-        self.ao_task_handle = C.c_void_p(0)
-        check(api.create_task(bytes(), self.ao_task_handle))
-        if self.num_digital_lines > 0:
-            self.do_task_handle = C.c_void_p(0)
-            check(api.create_task(bytes(), self.do_task_handle))
+        
+        if self.verbose: print("Opening %s-out board..."%self.channel_type)
+        self.task_handle = C.c_void_p(0)
+        check(api.create_task(bytes(), self.task_handle))
         # If I were a real man, I would automatically detect the proper
         # board name somehow
     # (http://digital.ni.com/public.nsf/allkb/86256F0E001DA9FF492572A5006FD7D3)
@@ -57,60 +63,61 @@ class Analog_Out:
         # this next api call crashes for you, check the name of your
         # analog-out card using NI Measurement and Automation Explorer
         # (NI MAX):
-        analog_device_name = bytes(
-            board_name + "/ao0:%i"%(self.num_channels - 1),
+        device_name = bytes(
+            board_name +
+            {'digital':'/port0/line', 'analog':'/ao'}[self.channel_type] +
+            '0:%i'%(self.num_channels - 1),
             'ascii')
-        check(api.create_ao_voltage_channel(
-            self.ao_task_handle,
-            analog_device_name,
-            b"",
-            -10, #Minimum voltage
-            +10.0, #Maximum voltage
-            10348, #DAQmx_Val_Volts; don't question it!
-            None)) #NULL
-        if self.num_digital_lines > 0:
-            digital_device_name = bytes(
-                board_name + "/port0/line0:%i"%(self.num_digital_lines - 1),
-                'ascii')
+        if self.channel_type == 'analog':
+            check(api.create_ao_voltage_channel(
+                self.task_handle,
+                device_name,
+                b"",
+                -10, #Minimum voltage
+                +10.0, #Maximum voltage
+                10348, #DAQmx_Val_Volts; don't question it!
+                None)) #NULL
+        elif self.channel_type == 'digital':
             check(api.create_do_channel(
-                self.do_task_handle,
-                digital_device_name,
+                self.task_handle,
+                device_name,
                 b"",
                 1)) #DAQmx_Val_ChanForAllLines; don't question it!
-        if self.verbose: print(" AO board open.")
+        if self.verbose: print(" Board open.")
         self.board_name = board_name
-
-        self.voltages = np.zeros((2, self.num_channels), dtype=np.float64)
-        if self.num_digital_lines > 0:
-            self.digits = np.zeros((2, self.num_digital_lines), dtype=np.uint8)
+        dtype = {'digital': np.uint8, 'analog': np.float64}[self.channel_type]
+        self.voltages = np.zeros((2, self.num_channels), dtype=dtype)
+        # Play initial voltages with the internal clock
+        self.clock_name = None 
         self.set_rate(rate)
         self._write_voltages()
-        if self.num_digital_lines > 0:
-            self._write_digits()
         self.play_voltages(force_final_zeros=False)
+        if clock_name is not None: # Switch to external clock
+            self.clock_name = clock_name
+            self.set_rate(rate)
         return None
 
     def set_rate(self, rate):
         self._ensure_task_is_stopped()
         assert 0 < rate <= self.max_rate
         self.rate = float(rate)
-        self._set_analog_rate(rate)
-        if self.num_digital_lines > 0:
-            self._set_digital_rate(rate)
-        if self.verbose:
-            print("AO board scan rate set to", self.rate, "points per second")
+        check(api.clock_timing(
+            self.task_handle,
+            self.clock_name, #NULL, to specify onboard clock for timing
+            self.rate,
+            10280, #DAQmx_Val_Rising (doesn't matter)
+            10178, #DAQmx_Val_FiniteSamps (run once)
+            self.voltages.shape[0]))
         return None
 
     def play_voltages(
         self,
         voltages=None,
-        digits=None,
         force_final_zeros=True,
         block=True,
         ):
         """
         If voltage is None, play the previously set voltage.
-        If digits is None, play the previously set digital signal.
         If 'force_final_zeros', the last entry of each channel of
         'voltages' is set to zero.
         If 'block', this function will not return until the voltages are
@@ -119,7 +126,7 @@ class Analog_Out:
         NB: by default, play_voltages() blocks until the voltages finish
         playing. This makes it harder to accidentally code yourself into
         ugly race conditions, but it obviously makes it hard to do
-        anything else while the AO board is playing voltages. Since
+        anything else while the board is playing voltages. Since
         we're just issuing a DLL call, it's easy for play_voltages() to
         return as soon as the voltage task has started playing. This is
         probably what you want! But easier to write bugs with.
@@ -129,40 +136,20 @@ class Analog_Out:
         self._ensure_task_is_stopped()
         if voltages is not None:
             assert len(voltages.shape) == 2
-            assert voltages.dtype == np.float64
+            assert voltages.dtype == self.voltages.dtype
             assert voltages.shape[0] >= 2
             assert voltages.shape[1] == self.num_channels
             if force_final_zeros:
                 if self.verbose:
-                    print("***Coercing AO voltages to end in zero!***")
+                    print("***Coercing voltages to end in zero!***")
                 voltages[-1, :] = 0
             old_voltages_shape = self.voltages.shape
             self.voltages = voltages
             if self.voltages.shape[0] != old_voltages_shape[0]:
-                self._set_analog_rate(self.rate)
-                if self.num_digital_lines > 0:
-                    assert digits is not None
-                    assert digits.shape[0] == self.voltages.shape[0]
+                self.set_rate(self.rate)
             self._write_voltages()
-        if digits is not None:
-            assert len(digits.shape) == 2
-            assert digits.dtype == np.uint8
-            assert digits.shape[0] == self.voltages.shape[0]
-            assert digits.shape[1] == self.num_digital_lines
-            if force_final_zeros:
-                if self.verbose:
-                    print("***Coercing DO voltages to end in zero!***")
-                digits[-1, :] = 0
-            old_digits_shape = self.digits.shape
-            self.digits = digits
-            if self.digits.shape[0] != old_digits_shape[0]:
-                self._set_digital_rate(self.rate)
-            self._write_digits()
-        if self.num_digital_lines > 0:
-            if self.verbose: print("Playing DO voltages")
-            check(api.start_task(self.do_task_handle))
-        if self.verbose: print("Playing AO voltages...")
-        check(api.start_task(self.ao_task_handle))
+        if self.verbose: print("Playing voltages...")
+        check(api.start_task(self.task_handle))
         self._task_running = True
         if block:
             self._ensure_task_is_stopped()
@@ -170,83 +157,41 @@ class Analog_Out:
 
     def close(self):
         self._ensure_task_is_stopped()
-        if self.verbose: print("Closing AO board...")
-        check(api.clear_task(self.ao_task_handle))
-        if self.num_digital_lines > 0:
-            check(api.clear_task(self.do_task_handle))
-            if self.verbose: print("Closing DO board...")
-        if self.verbose: print(" AO board is closed.")
+        if self.verbose: print("Closing %s board..."%self.daq_type)
+        check(api.clear_task(self.task_handle))
+        if self.verbose: print(" %s board is closed."%self.daq_type)
         return None
 
     def _ensure_task_is_stopped(self):
         if not hasattr(self, '_task_running'):
             self._task_running = False
         if self._task_running:
-            if self.verbose: print("Waiting for AO board to finish playing...")
-            check(api.finish_task(self.ao_task_handle, -1))
-            if self.verbose: print(" AO board is finished playing.")
-            if self.num_digital_lines > 0:
-                if self.verbose: print("Waiting for DO board to finish playing...")
-                check(api.finish_task(self.do_task_handle, -1))
-                if self.verbose: print(" DO board is finished playing.")
-                check(api.stop_task(self.do_task_handle))
-            check(api.stop_task(self.ao_task_handle))
+            if self.verbose: print("Waiting for board to finish playing...")
+            check(api.finish_task(self.task_handle, -1))
+            if self.verbose: print(" NI%s is finished playing."%self.daq_type)
+            check(api.stop_task(self.task_handle))
             self._task_running = False
         return None
     
     def _write_voltages(self):
-        if not hasattr(self, 'num_analog_points_written'):
-            self.num_analog_points_written = C.c_int32(0)
-        check(api.write_voltages(
-            self.ao_task_handle,
+        if not hasattr(self, 'num_points_written'):
+            self.num_points_written = C.c_int32(0)
+        write = {'analog': api.write_voltages,
+                 'digital': api.write_digits}[self.channel_type]       
+        check(write(
+            self.task_handle,
             self.voltages.shape[0], #Samples per channel
             0, #Set autostart to False
             10.0, #Timeout for writing, in seconds. We could be smarter...
             1, #DAQmx_Val_GroupByScanNumber (interleaved)
             self.voltages,
-            self.num_analog_points_written,
+            self.num_points_written,
             None))
         if self.verbose:
-            print(self.num_analog_points_written.value,
-                  "points written to each AO channel.")
+            print(self.num_points_written.value,
+                  "points written to each %s channel."%self.daq_type)
         return None
 
-    def _write_digits(self):
-        if not hasattr(self, 'num_digital_points_written'):
-            self.num_digital_points_written = C.c_int32(0)
-        check(api.write_digits(
-            self.do_task_handle,
-            self.digits.shape[0], #Samples per channel
-            0, #Set autostart to False
-            10.0, #Timeout for writing, in seconds. We could be smarter...
-            1, #DAQmx_Val_GroupByScanNumber (interleaved)
-            self.digits,
-            self.num_digital_points_written,
-            None))
-        if self.verbose:
-            print(self.num_digital_points_written.value,
-                  "points written to each DO channel.")
-        return None
-
-    def _set_analog_rate(self, rate):
-        check(api.clock_timing(
-            self.ao_task_handle,
-            None, #NULL, to specify onboard clock for timing
-            self.rate,
-            10280, #DAQmx_Val_Rising (doesn't matter)
-            10178, #DAQmx_Val_FiniteSamps (run once)
-            self.voltages.shape[0]))
-        return None
-
-    def _set_digital_rate(self, rate):
-        check(api.clock_timing(
-            self.do_task_handle,
-            bytes('/' + self.board_name + '/ao/SampleClock', 'ascii'),
-            self.rate,
-            10280, #DAQmx_Val_Rising (doesn't matter)
-            10178, #DAQmx_Val_FiniteSamps (run once)
-            self.digits.shape[0]))
-        return None
 
 PCI_6733 = Analog_Out # Backwards compatible
 
