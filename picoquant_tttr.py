@@ -331,9 +331,19 @@ if __name__ == '__main__':
     # We can visualize just the ONE frame we parsed:
     im = parsed_frame_to_histogram(parsed_frame)
     print(im.shape, im.dtype)
-    fig = plt.figure()
-    for ch in range(4):
-        plt.plot(im[:, ch, :, :].sum(axis=-1).sum(axis=-1), '.-')
-    plt.grid()
-    plt.title("Lifetime histograms")
-    fig.show()
+    if plt is not None:
+        fig = plt.figure()
+        for ch in range(4):
+            plt.plot(im[:, ch, :, :].sum(axis=-1).sum(axis=-1),
+                     '.-', label="Channel %d"%(ch+1))
+        plt.grid('on')
+        plt.title("Lifetime histograms")
+        plt.legend()
+        fig.show()
+
+        fig = plt.figure()
+        for ch in range(4):
+            plt.subplot(2, 2, ch+1)
+            plt.imshow(im[:, ch, :, :].sum(axis=0), cmap=plt.cm.gray)
+            plt.title("Channel %d"%(ch+1))
+        fig.show()
