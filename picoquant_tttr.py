@@ -6,7 +6,18 @@ try:
 except ImportError:
     plt = None
 
+"""
+Utility functions for loading picoquant TTTR .ptu files as numpy
+arrays. So far, we only support version 1.0.00 of PicoHarp T3 format,
+because that's the only type of data produced hardware we have.
+"""
+
 def parse_tttr_header(filename, verbose=True, max_tags=1000):
+    """Reads the header of a PicoQuant TTTR .ptu file as a dict of tags.
+
+    You'll need these tags as input if you want to run the other
+    functions in this module.
+    """
     # We're only trying to read .ptu files:
     assert os.path.splitext(filename)[1] == '.ptu'
     with open(filename, 'rb') as file:
@@ -105,49 +116,6 @@ def parse_tttr_header(filename, verbose=True, max_tags=1000):
                          tags['TTResult_NumberOfRecords']['values'][0])
     assert num_data_bytes == remaining_bytes
     return tags
-
-##def generate_picoharp_t3_frames(
-##    filename,
-##    tags,
-##    records_per_chunk=int(2.5e6),
-##    verbose=True,
-##    ):
-##    """
-##    Returns a generator which loads one frame at a time from picoharp t3 files
-##
-##    The hitch is we don't know how many bytes to load to get one frame,
-##    so we load bytes in chunks, search the chunks for frame markers, and
-##    'yield' one frame at a time.
-##    """
-##    # We're going to use this symbol to identify frames:
-##    assert 3 == tags['ImgHdr_Frame']['values'][0]
-##    # Current implementation loads the file twice which is lazy coding,
-##    # but maybe forgivable? We'll see how bad of a performance hit this
-##    # causes. TODO: Just load the file once bro.
-##    num_records = tags['TTResult_NumberOfRecords']['values'][0]
-##    which_record = 0
-##    frame_markers = [-1]
-##    while which_record < (num_records - 1):
-##        with open(filename, 'rb') as f:
-##            f.seek(-4*(num_records - which_record), 2) # 4 bytes per record
-##            records_to_read = min(records_per_chunk,
-##                                  num_records - which_record)
-##            records = np.frombuffer(f.read(4*records_to_read), dtype=np.uint32)
-##        # Inspect the record for frame markers, which have channel=15
-##        # and  dtime=3.
-##        frame_markers.extend(
-##            which_record + np.nonzero((records & 0xf0040000) == 0xf0040000)[0])
-##        which_record += records_to_read
-##    if verbose:
-##        print('File "', filename, '" has ', len(frame_markers)-1, ' frames.',
-##              sep='')
-##    for i in range(len(frame_markers) - 1):
-##        # Loop over each frame
-##        start, stop = frame_markers[i]+1, frame_markers[i+1]
-##        with open(filename, 'rb') as f:
-##            f.seek(-4*(num_records - start), 2) # 4 bytes per record
-##            records = np.frombuffer(f.read(4*(stop - start)), dtype=np.uint32)
-##        yield records
 
 def generate_picoharp_t3_frames(
     filename,
