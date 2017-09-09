@@ -8,8 +8,8 @@ except ImportError:
 
 """
 Utility functions for loading picoquant TTTR .ptu files as numpy
-arrays. So far, we only support version 1.0.00 of PicoHarp T3 format,
-because that's the only type of data produced hardware we have.
+arrays. So far, we only support version 1.0.00 of the PicoHarp T3 format,
+because that's the only type of data our hardware produces.
 """
 
 def parse_tttr_header(filename, verbose=True, max_tags=1000):
