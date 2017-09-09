@@ -202,8 +202,8 @@ def parse_picoharp_t3_frame(
     # have passed since the overflow immediately preceding this frame?):
     overflows = (records == 0xf0000000)
     num_overflows = np.cumsum(overflows).astype(np.uint32)
-    # Now which we can clean out overflow records, which can be the
-    # majority record for dim samples.
+    # Now we can clean out overflow records, which can be the majority
+    # record for dim samples:
     records = records[~overflows]
     num_overflows = num_overflows[~overflows]
     del overflows
@@ -246,7 +246,9 @@ def parse_picoharp_t3_frame(
     # Convert from "fraction" units to pixel units:
     x_pos *=  tags['ImgHdr_PixX']['values'][0]
     # Now that we've calculated positions, we can remove reports that
-    # aren't photoelectrons
+    # aren't photoelectrons. Allocating new memory like this is slow,
+    # but this prevents accidentally using extra memory to hold the
+    # records we're ignoring:
     electrons = (channel != 15)
     y_pos   = y_pos[electrons].copy()
     x_pos   = x_pos[electrons].copy()
@@ -285,11 +287,19 @@ def parsed_frame_to_histogram(
     y_pix_per_bin=1,
     t_pix_per_bin=40,
     ):
-    """
+    """Convert the output of parse_picoharp_t3 frame to a 4D numpy array. 
+
+    If you know what you're doing, you can probably make better use of
+    np.histogramdd. If you don't, this function is a convenient way to
+    get a histogram without thinking too hard.
+
     '*_bin_size' lets you choose how many pixels per bin. The parsed
     frame data already has opinions about the x/y pixel size. Since dtime
     for the Picoharp T3 format is 12-bit, we'll use 2**12 time bins to
     define the native time pixel size.
+
+    TODO: make it easier to discover the pixel size in nanometers and
+    picoseconds.
     """
     x_pix = parsed_frame['tags']['ImgHdr_PixX']['values'][0]
     y_pix = parsed_frame['tags']['ImgHdr_PixY']['values'][0]
@@ -325,7 +335,7 @@ if __name__ == '__main__':
             parsed_frame = parse_picoharp_t3_frame(
                 records=f,
                 tags=tags,
-                verbose=False,
+                verbose=True,
                 show_plot=True)
             print("done.")
     # We can visualize just the ONE frame we parsed:
