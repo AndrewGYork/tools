@@ -124,7 +124,12 @@ def generate_picoharp_t3_frames(
     verbose=True,
     ):
     """
-    Returns a generator which loads one frame at a time from picoharp t3 files
+    Returns a generator which loads one frame at a time from PicoHarp T3
+    formatted .ptu files.
+
+    I don't think there's an upper bound on how big .ptu files can be,
+    and sometimes they're too big to comfortably hold in memory, so I
+    want to be able to load one frame at a time.
 
     The hitch is we don't know how many bytes to load to get one frame,
     so we load bytes in chunks, search the chunks for frame markers, and
@@ -132,9 +137,7 @@ def generate_picoharp_t3_frames(
     """
     # We're going to use this symbol to identify frames:
     assert 3 == tags['ImgHdr_Frame']['values'][0]
-    # Current implementation loads the file twice which is lazy coding,
-    # but maybe forgivable? We'll see how bad of a performance hit this
-    # causes. TODO: Just load the file once bro.
+    # This tag is mandatory, so we know it's present:
     num_records = tags['TTResult_NumberOfRecords']['values'][0]
     loaded_records = []
     with open(filename, 'rb') as f:
@@ -142,10 +145,10 @@ def generate_picoharp_t3_frames(
         while True:
             records = np.frombuffer(f.read(4*records_per_chunk),
                                     dtype=np.uint32)
-            if len(records) == 0:
+            if len(records) == 0: # End of file
                 break
             # Inspect the records for frame markers, which have
-            # channel=15 and dtime=3.
+            # channel = 15 and dtime >= 3.
             is_frame_marker = records.view(dtype=np.uint16)[1::2] >= 0xf004
             frame_marker_indices = np.nonzero(is_frame_marker)[0]
             while len(frame_marker_indices) > 0:
@@ -155,13 +158,19 @@ def generate_picoharp_t3_frames(
                 # frame markers.
                 fmi = frame_marker_indices[0]
                 loaded_records.append(records[:fmi])
-                if len(loaded_records) > 1:
+                if len(loaded_records) > 1: # Remember to use the old records!
                     yield np.concatenate(loaded_records)
-                else:
+                else: # Don't bother with a slow 'concatenate'
                     yield loaded_records[-1]
+                # Now we chew one frame marker worth of records off the
+                # freshly loaded records, pop one frame marker index,
+                # and re-align any remaining frame marker indices with
+                # the new record length:
                 loaded_records = []
                 frame_marker_indices = frame_marker_indices[1:] - (fmi+1)
                 records = records[fmi+1:]
+            # We're out of frame markers; store any leftover records for
+            # the next pass through the loop:
             loaded_records.append(records)                   
         
 def parse_picoharp_t3_frame(
@@ -171,6 +180,12 @@ def parse_picoharp_t3_frame(
     show_plot=False,
     sinusoid_correction=True,
     ):
+    """Converts one frame worth of records to a dict of 1D numpy arrays.
+
+    The output is suitable for binning into a 4D numpy histogram showing
+    photoelectrons vs. x/y position, arrival time relative to the
+    excitation pulse, and channel.
+    """
     # This function only supports the PicoHarp T3 (with 32-bit records):
     assert 0x00010303 == tags['TTResultFormat_TTTRRecType']['values'][0]
     assert 32 == tags['TTResultFormat_BitsPerRecord']['values'][0]
@@ -303,33 +318,22 @@ if __name__ == '__main__':
     print()
     # We loop over the frames one at a time:
     frames = generate_picoharp_t3_frames(filename, tags, verbose=True)
-
-    import time
-##    for chsize in (500000, 1000000, 2000000, 3000000, 4000000, 5000000, 6000000):
-    start = time.perf_counter()
-    for i in range(5):
-        frames = generate_picoharp_t3_frames(filename, tags, verbose=False)
-        print(sum(len(f) for f in frames))
-    end = time.perf_counter()
-##    print(chsize)
-    print('        ', end-start)
-
-##    for i, f in enumerate(frames):
-##        # We don't have to parse every frame:
-##        if i in range(1):
-##            print("Parsing frame ", i, '... ', sep='', end='')
-##            parsed_frame = parse_picoharp_t3_frame(
-##                records=f,
-##                tags=tags,
-##                verbose=False,
-##                show_plot=True)
-##            print("done.")
-##    # We can visualize just the ONE frame we parsed:
-##    im = parsed_frame_to_histogram(parsed_frame)
-##    print(im.shape, im.dtype)
-##    fig = plt.figure()
-##    for ch in range(4):
-##        plt.plot(im[:, ch, :, :].sum(axis=-1).sum(axis=-1), '.-')
-##    plt.grid()
-##    plt.title("Lifetime histograms")
-##    fig.show()
+    for i, f in enumerate(frames):
+        # We don't have to parse every frame:
+        if i == 10:
+            print("Parsing frame ", i, '... ', sep='', end='')
+            parsed_frame = parse_picoharp_t3_frame(
+                records=f,
+                tags=tags,
+                verbose=False,
+                show_plot=True)
+            print("done.")
+    # We can visualize just the ONE frame we parsed:
+    im = parsed_frame_to_histogram(parsed_frame)
+    print(im.shape, im.dtype)
+    fig = plt.figure()
+    for ch in range(4):
+        plt.plot(im[:, ch, :, :].sum(axis=-1).sum(axis=-1), '.-')
+    plt.grid()
+    plt.title("Lifetime histograms")
+    fig.show()
