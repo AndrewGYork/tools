@@ -146,7 +146,7 @@ def stack_registration(
             registration_type = 'nearest_integer'
         else:
             registration_type = 'fourier_interpolation'
-        apply_registration_shifts(s, registration_shifts)
+        apply_registration_shifts(s, registration_shifts, registration_type=registration_type)
     if debug:
         np_tif.array_to_tif(masked_stack, 'DEBUG_masked_stack.tif')
         np_tif.array_to_tif(np.log(np.abs(masked_stack_ft)),
