@@ -14,7 +14,8 @@ def stack_registration(
     refinement='spike_interpolation',
     register_in_place=True,
     fourier_cutoff_radius=None,
-    debug=False):
+    background_subtraction=None,
+    debug=False,):
     """Calculate shifts which would register the slices of a
     three-dimensional stack `s`, and optionally register the stack in-place.
 
@@ -39,6 +40,17 @@ def stack_registration(
     frequencies higher than this cutoff, since they're probably lousy
     due to aliasing and noise anyway. If `None`, attempt to estimate a
     resonable cutoff.
+
+    'background_subtraction': One of None, 'mean', 'min', or
+    'edge_mean'. Image registration is sensitive to edge effects. To
+    combat this, we multiply the image by a real-space mask which goes
+    to zero at the edges. For dim images on large DC backgrounds, the
+    registration can end up mistaking this mask for an important image
+    feature, distorting the registration. Sometimes it's helpful to
+    subtract a background from the image before registration, to reduce
+    this effect. 'mean' and 'min' subtract the mean and minimum of the
+    stack 's', respectively, and 'edge_mean' subtracts the mean of the
+    edge pixels. Use None (the default) for no background subtraction.
     """
     assert len(s.shape) == 3
     try:
@@ -51,10 +63,21 @@ def stack_registration(
     if refinement == 'phase_fitting' and minimize is None:
         raise UserWarning("Failed to import scipy minimize; no phase fitting.")
     assert register_in_place in (True, False)
-    assert debug in (True, False)
+    # What background should we subtract from each slice of the stack?
+    assert background_subtraction in (None, 'mean', 'min', 'edge_mean')
+    if background_subtraction is None:
+        bg = 0
+    elif background_subtraction is 'min':
+        bg = s.min()
+    elif background_subtraction is 'mean':
+        bg = s.mean()
+    elif background_subtraction is 'edge_mean':
+        bg = np.mean((s[:, 0, :].mean(), s[:, -1, :].mean(),
+                      s[:, :, 0].mean(), s[:, :, -1].mean()))
     if fourier_cutoff_radius is None:
-        fourier_cutoff_radius = estimate_fourier_cutoff_radius(s, debug)
+        fourier_cutoff_radius = estimate_fourier_cutoff_radius(s, bg, debug)
     assert (0 < fourier_cutoff_radius <= 0.5)
+    assert debug in (True, False)
     if debug and np_tif is None:
         raise UserWarning("Failed to import np_tif; no debug mode.")
     ## Multiply each slice of the stack by an XY mask that goes to zero
@@ -62,7 +85,7 @@ def stack_registration(
     ## Fourier transform.
     mask_ud = np.sin(np.linspace(0, np.pi, s.shape[1])).reshape(s.shape[1], 1)
     mask_lr = np.sin(np.linspace(0, np.pi, s.shape[2])).reshape(1, s.shape[2])
-    masked_reference_slice = align_to_this_slice * mask_ud * mask_lr
+    masked_reference_slice = (align_to_this_slice - bg) * mask_ud * mask_lr
     ## We'll base our registration on the phase of the low spatial
     ## frequencies of the cross-power spectrum. We'll need the complex
     ## conjugate of the Fourier transform of the masked reference slice,
@@ -88,7 +111,7 @@ def stack_registration(
         if debug: print("Calculating registration for slice", which_slice)
         ## Compute the cross-power spectrum of our slice, and mask out
         ## the high spatial frequencies.
-        current_slice = s[which_slice, :, :] * mask_ud * mask_lr
+        current_slice = (s[which_slice, :, :] - bg) * mask_ud * mask_lr
         current_slice_ft = np.fft.rfftn(current_slice)
         cross_power_spectrum = current_slice_ft * ref_slice_ft_conj
         cross_power_spectrum = (fourier_mask *
@@ -146,7 +169,8 @@ def stack_registration(
             registration_type = 'nearest_integer'
         else:
             registration_type = 'fourier_interpolation'
-        apply_registration_shifts(s, registration_shifts, registration_type=registration_type)
+        apply_registration_shifts(
+            s, registration_shifts, registration_type=registration_type)
     if debug:
         np_tif.array_to_tif(masked_stack, 'DEBUG_masked_stack.tif')
         np_tif.array_to_tif(np.log(np.abs(masked_stack_ft)),
@@ -214,19 +238,20 @@ def expected_cross_power_spectrum(shift, k_ud, k_lr):
     shift_ud, shift_lr = shift
     return np.exp(-2j*np.pi*(k_ud*shift_ud + k_lr*shift_lr))
 
-def estimate_fourier_cutoff_radius(s, debug=False):
+def estimate_fourier_cutoff_radius(s, bg=0, debug=False):
     """Estimate the radius in the Fourier domain which divides signal
     from pure noise.
 
     The Fourier transform amplitudes of most microscope images show a
     clear circular edge, outside of which there is no signal. This
     function tries to estimate the position of this edge. The estimation
-    is not especially precise, but seems to be withint the tolerance of
+    is not especially precise, but seems to be within the tolerance of
     `stack_registration`.
     """
     # We only need one slice for this estimate:
     if len(s.shape) == 3: s = s[0, :, :]
     assert len(s.shape) == 2
+    s = s - bg # Background subtraction
     # Mask `s` to avoid fourier-domain artifacts:
     mask_ud = np.sin(np.linspace(0, np.pi, s.shape[0])).reshape(s.shape[0], 1)
     mask_lr = np.sin(np.linspace(0, np.pi, s.shape[1])).reshape(1, s.shape[1])
