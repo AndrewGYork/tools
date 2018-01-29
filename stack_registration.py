@@ -1,8 +1,12 @@
 import numpy as np
 try:
     from scipy.optimize import minimize
+    from scipy.ndimage import map_coordinates
+    from scipy.ndimage.interpolation import rotate
 except:
     minimize = None #Won't be able to use 'phase_fitting' in stack_registration
+    map_coordinates = None # Won't be able to use stack_rotational_registration
+    rotate = None
 try:
     import np_tif
 except:
@@ -226,6 +230,187 @@ def apply_registration_shifts(
             s[which_slice, :top, :].fill(0), s[which_slice, bot:, :].fill(0)
             s[which_slice, :, :lef].fill(0), s[which_slice, :, rig:].fill(0)
     return None #`s` is modified in-place.
+
+def stack_rotational_registration(
+    s,
+    align_to_this_slice=0,
+    refinement='spike_interpolation',
+    register_in_place=True,
+    fourier_cutoff_radius=None,
+    debug=False,):
+    """Calculate rotations which would rotationally register the slices
+    of a three-dimensional stack `s`, and optionally rotate the stack
+    in-place.
+
+    Axis 0 is the "z-axis", axis 1 is the "up-down" (Y) axis, and axis 2
+    is the "left-right" (X) axis. For each XY slice, we calculate the
+    rotation in the XY plane which would line that slice up with the
+    slice specified by `align_to_this_slice`. If `align_to_this_slice`
+    is a number, it indicates which slice of `s` to use as the reference
+    slice. If `align_to_this_slice` is a numpy array, it is used as the
+    reference slice, and must be the same shape as a 2D slice of `s`.
+
+    `refinement` is pretty much just `spike_interpolation`, until I get
+    around to adding other refinement techniques.
+
+    `register_in_place`: If `True`, modify the input stack `s` by
+    shifting its slices to line up with the reference slice.
+
+    `fourier_cutoff_radius`: Ignore the Fourier amplitudes of spatial
+    frequencies higher than this cutoff, since they're probably lousy
+    due to aliasing and noise anyway. If `None`, attempt to estimate a
+    resonable cutoff.
+    """
+    assert len(s.shape) == 3
+    try:
+        assert align_to_this_slice in range(s.shape[0])
+        align_to_this_slice = s[align_to_this_slice, :, :]
+    except ValueError: # Maybe align_to_this_slice is a numpy array?
+        align_to_this_slice = np.squeeze(align_to_this_slice)
+    assert align_to_this_slice.shape == s.shape[-2:]
+    ## Create a square-cropped view 'c' of the input stack 's'. We're
+    ## going to use a circular mask anyway, and this saves us from
+    ## having to worry about nonuniform k_x, k_y sampling in Fourier
+    ## space:
+    delta = s.shape[1] - s.shape[2]
+    if delta > 0:
+        y_slice, x_slice = slice(delta//2, delta//2 - delta), slice(s.shape[2])
+    elif delta < 0:
+        y_slice, x_slice = slice(s.shape[1]), slice(-delta//2, delta - delta//2)
+    c = s[:, y_slice, x_slice]
+    align_to_this_slice = align_to_this_slice[y_slice, x_slice]
+    assert c.shape[1] == c.shape[2] # Take this line out in a few months!
+    assert refinement in ('spike_interpolation',)
+    assert register_in_place in (True, False)
+    if fourier_cutoff_radius is None:
+        fourier_cutoff_radius = estimate_fourier_cutoff_radius(c, debug=debug)
+    assert (0 < fourier_cutoff_radius <= 0.5)
+    assert debug in (True, False)
+    if debug and np_tif is None:
+        raise UserWarning("Failed to import np_tif; no debug mode.")
+    if map_coordinates is None:
+        raise UserWarning("Failed to import scipy map_coordinates;" +
+                          " no stack_rotational_registration.")
+    ## We'll multiply each slice of the stack by a circular mask to
+    ## prevent edge-effect artifacts when we Fourier transform:
+    mask_ud = np.arange(-c.shape[1]/2, c.shape[1]/2).reshape(c.shape[1], 1)
+    mask_lr = np.arange(-c.shape[2]/2, c.shape[2]/2).reshape(1, c.shape[2])
+    mask_r_sq = mask_ud**2 + mask_lr**2
+    max_r_sq = (c.shape[1]/2)**2
+    mask =  (mask_r_sq <= max_r_sq) * np.cos((np.pi/2)*(mask_r_sq/max_r_sq))
+    del mask_ud, mask_lr, mask_r_sq
+    masked_reference_slice = align_to_this_slice * mask
+    ## We'll base our rotational registration on the logarithms of the
+    ## amplitudes of the low spatial frequencies of the reference and
+    ## target slices. We'll need the amplitudes of the Fourier transform
+    ## of the masked reference slice:
+    ref_slice_ft_log_amp = np.log(np.abs(np.fft.fftshift(np.fft.rfftn(
+        masked_reference_slice), axes=0)))
+    ## Transform the reference slice log amplitudes to polar
+    ## coordinates. Note that we avoid some potential subtleties here
+    ## because we've cropped to a square field of view (which was the
+    ## right thing to do anyway):
+    n_y, n_x = ref_slice_ft_log_amp.shape
+    k_r = np.arange(1, 2*fourier_cutoff_radius*n_x)
+    k_theta = np.linspace(-np.pi/2, np.pi/2,
+                          np.ceil(2*fourier_cutoff_radius*n_y))
+    k_theta_delta_degrees = (k_theta[1] - k_theta[0]) * 180/np.pi
+    k_r, k_theta = k_r.reshape(len(k_r), 1), k_theta.reshape(1, len(k_theta))
+    k_y = k_r * np.sin(k_theta) + n_y//2
+    k_x = k_r * np.cos(k_theta)
+    del k_r, k_theta, n_y, n_x
+    polar_ref = map_coordinates(ref_slice_ft_log_amp, (k_y, k_x))
+    polar_ref_ft_conj = np.conj(np.fft.rfft(polar_ref, axis=1))
+    n_y, n_x = polar_ref_ft_conj.shape
+    y, x = np.arange(n_y).reshape(n_y, 1), np.arange(n_x).reshape(1, n_x)
+    polar_fourier_mask = (y > x) # Triangular half-space of good FT phases
+    del n_y, n_x, y, x
+    ## Now we'll loop over each slice of the stack, calculate our
+    ## registration rotations, and optionally apply the rotations to the
+    ## original stack.
+    registration_rotations_degrees = []
+    if debug:
+        ## Save some intermediate data to help with debugging
+        n_z = c.shape[0]
+        masked_stack = np.zeros_like(c)
+        masked_stack_ft_log_amp = np.zeros((n_z,) + ref_slice_ft_log_amp.shape)
+        polar_stack = np.zeros((n_z,) + polar_ref.shape)
+        polar_stack_ft = np.zeros((n_z,) + polar_ref_ft_conj.shape,
+                                  dtype=np.complex128)
+        cross_power_spectra = np.zeros_like(polar_stack_ft)
+        spikes = np.zeros_like(polar_stack)
+    for which_slice in range(c.shape[0]):
+        if debug:
+            print("Calculating rotational registration for slice", which_slice)
+        ## Compute the polar transform of the log of the amplitude
+        ## spectrum of our masked slice:
+        current_slice = c[which_slice, :, :] * mask
+        current_slice_ft_log_amp = np.log(np.abs(np.fft.fftshift(np.fft.rfftn(
+            current_slice), axes=0)))
+        polar_slice = map_coordinates(current_slice_ft_log_amp, (k_y, k_x))
+        ## Register the polar transform of the current slice against the
+        ## polar transform of the reference slice, using a similar
+        ## algorithm to the one in mr_stacky:
+        polar_slice_ft = np.fft.rfft(polar_slice, axis=1)
+        cross_power_spectrum = polar_slice_ft * polar_ref_ft_conj
+        cross_power_spectrum = (polar_fourier_mask *
+                                cross_power_spectrum /
+                                np.abs(cross_power_spectrum))
+        ## Inverse transform to get a 'spike' in each row of fixed k_r;
+        ## the location of this spike gives the desired rotation in
+        ## theta pixels, which we can convert back to an angle. Start by
+        ## locating the spike to the nearest integer:
+        spike = np.fft.irfft(cross_power_spectrum,
+                             axis=1, n=polar_slice.shape[1])
+        spike_1d = spike.sum(axis=0)
+        loc = np.argmax(spike_1d)
+        if refinement is 'spike_interpolation':
+            ## Use (very simple) three-point polynomial interpolation to
+            ## refine the location of the peak of the spike:
+            neighbors = np.array([-1, 0, 1])
+            lr_vals = spike_1d[(loc + neighbors) %spike.shape[1]]
+            lr_fit = np.poly1d(np.polyfit(neighbors, lr_vals, deg=2))
+            lr_max_shift = -lr_fit[1] / (2 * lr_fit[2])
+            loc += lr_max_shift
+        ## Convert our shift into a signed number near zero:
+        loc = (loc + spike.shape[1]//2) % spike.shape[1] - spike.shape[1]//2
+        ## Convert this shift in "theta pixels" back to a rotation in degrees:
+        registration_rotations_degrees.append(loc * k_theta_delta_degrees)
+        if debug:
+            ## Save some intermediate data to help with debugging
+            masked_stack[which_slice, :, :] = current_slice
+            masked_stack_ft_log_amp[which_slice, :, :] = (
+                current_slice_ft_log_amp)
+            polar_stack[which_slice, :, :] = polar_slice
+            polar_stack_ft[which_slice, :, :] = polar_slice_ft
+            cross_power_spectra[which_slice, :, :] = cross_power_spectrum
+            spikes[which_slice, :, :] = np.fft.fftshift(spike, axes=1)
+    if register_in_place:
+        ## Rotate the slices of the input stack in-place so it's
+        ## rotationally registered:
+        for which_slice in range(s.shape[0]):
+            s[which_slice, :, :] = rotate(
+                s[which_slice, :, :],
+                angle=registration_rotations_degrees[which_slice],
+                reshape=False)
+    if debug:
+        np_tif.array_to_tif(masked_stack, 'DEBUG_masked_stack.tif')
+        np_tif.array_to_tif(masked_stack_ft_log_amp,
+                            'DEBUG_masked_stack_FT_log_magnitudes.tif')
+        np_tif.array_to_tif(polar_stack,
+                            'DEBUG_polar_stack.tif')
+        np_tif.array_to_tif(np.angle(polar_stack_ft),
+                            'DEBUG_polar_stack_FT_phases.tif')
+        np_tif.array_to_tif(np.log(np.abs(polar_stack_ft)),
+                            'DEBUG_polar_stack_FT_log_magnitudes.tif')
+        np_tif.array_to_tif(np.angle(cross_power_spectra),
+                            'DEBUG_cross_power_spectral_phases.tif')
+        np_tif.array_to_tif(spikes, 'DEBUG_spikes.tif')
+        if register_in_place:
+            np_tif.array_to_tif(s, 'DEBUG_registered_stack.tif')
+    return np.array(registration_rotations_degrees)
+
+mr_spinny = stack_rotational_registration #I like calling it this.
 
 def expected_cross_power_spectrum(shift, k_ud, k_lr):
     """A convenience function that gives the expected spectral phase
