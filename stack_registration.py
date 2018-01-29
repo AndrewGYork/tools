@@ -273,10 +273,11 @@ def stack_rotational_registration(
     ## having to worry about nonuniform k_x, k_y sampling in Fourier
     ## space:
     delta = s.shape[1] - s.shape[2]
-    if delta > 0:
-        y_slice, x_slice = slice(delta//2, delta//2 - delta), slice(s.shape[2])
-    elif delta < 0:
-        y_slice, x_slice = slice(s.shape[1]), slice(-delta//2, delta - delta//2)
+    y_slice, x_slice = slice(s.shape[1]), slice(s.shape[2]) # Default: no crop
+    if delta > 0: # Crop Y
+        y_slice = slice(delta//2, delta//2 - delta)
+    elif delta < 0: # Crop X
+        x_slice = slice(-delta//2, delta - delta//2)
     c = s[:, y_slice, x_slice]
     align_to_this_slice = align_to_this_slice[y_slice, x_slice]
     assert c.shape[1] == c.shape[2] # Take this line out in a few months!
@@ -525,32 +526,76 @@ if __name__ == '__main__':
     crop = 8
     blur = 4
     brightness = 0.1
-    print("Creating shifted stack from test object...")
-    shifted_obj = np.zeros_like(obj)
+##    print("Creating shifted stack from test object...")
+##    shifted_obj = np.zeros_like(obj)
+##    stack = np.zeros((len(shifts),
+##                      obj.shape[1]//bucket_size[1] - 2*crop,
+##                      obj.shape[2]//bucket_size[2] - 2*crop))
+##    expected_phases = np.zeros((len(shifts),) +
+##                               np.fft.rfft(stack[0, :, :]).shape)
+##    k_ud, k_lr = np.fft.fftfreq(stack.shape[1]), np.fft.rfftfreq(stack.shape[2])
+##    k_ud, k_lr = k_ud.reshape(k_ud.size, 1), k_lr.reshape(1, k_lr.size)
+##    for s, (y, x) in enumerate(shifts):
+##        top = max(0, y)
+##        lef = max(0, x)
+##        bot = min(obj.shape[-2], obj.shape[-2] + y)
+##        rig = min(obj.shape[-1], obj.shape[-1] + x)
+##        shifted_obj.fill(0)
+##        shifted_obj[0, top:bot, lef:rig] = obj[0, top-y:bot-y, lef-x:rig-x]
+##        stack[s, :, :] = np.random.poisson(
+##            brightness *
+##            bucket(gaussian_filter(shifted_obj, blur), bucket_size
+##                   )[0, crop:-crop, crop:-crop])
+##        expected_phases[s, :, :] = np.angle(np.fft.fftshift(
+##            expected_cross_power_spectrum((y/bucket_size[1], x/bucket_size[2]),
+##                                          k_ud, k_lr), axes=0))
+##    np_tif.array_to_tif(expected_phases, 'DEBUG_expected_phase_vs_ref.tif')
+##    np_tif.array_to_tif(stack, 'DEBUG_stack.tif')
+##    print(" Done.")
+##    print("Registering test stack...")
+##    calculated_shifts = stack_registration(
+##        stack,
+##        refinement='spike_interpolation',
+##        debug=True)
+##    print(" Done.")
+##    for s, cs in zip(shifts, calculated_shifts):
+##        print('%0.2f (%i)'%(cs[0] * bucket_size[1], s[0]),
+##              '%0.2f (%i)'%(cs[1] * bucket_size[2], s[1]))
+##    input("Hit enter to test rotational registration" + 
+##          " (this will overwrite some of the DEBUG_ files" + 
+##          " from translational registration)")
+
+    # Now we test rotational alignment, on top of translational alignment
+    print("Creating rotated and shifted stack from test object...")
+    angles_deg = [360*np.random.random() for s in shifts]
+    angles_deg[0] = 0
+    rotated_shifted_obj = np.zeros_like(obj)
     stack = np.zeros((len(shifts),
                       obj.shape[1]//bucket_size[1] - 2*crop,
                       obj.shape[2]//bucket_size[2] - 2*crop))
-    expected_phases = np.zeros((len(shifts),) +
-                               np.fft.rfft(stack[0, :, :]).shape)
-    k_ud, k_lr = np.fft.fftfreq(stack.shape[1]), np.fft.rfftfreq(stack.shape[2])
-    k_ud, k_lr = k_ud.reshape(k_ud.size, 1), k_lr.reshape(1, k_lr.size)
     for s, (y, x) in enumerate(shifts):
         top = max(0, y)
         lef = max(0, x)
         bot = min(obj.shape[-2], obj.shape[-2] + y)
         rig = min(obj.shape[-1], obj.shape[-1] + x)
-        shifted_obj.fill(0)
-        shifted_obj[0, top:bot, lef:rig] = obj[0, top-y:bot-y, lef-x:rig-x]
+        rotated_shifted_obj.fill(0)
+        rotated_shifted_obj[0, top:bot, lef:rig
+                            ] = obj[0, top-y:bot-y, lef-x:rig-x]
+        rotated_shifted_obj = rotate(rotated_shifted_obj, angles_deg[s],
+                                     reshape=False, axes=(2, 1))
+        rotated_shifted_obj[rotated_shifted_obj <= 0] = 0
         stack[s, :, :] = np.random.poisson(
             brightness *
-            bucket(gaussian_filter(shifted_obj, blur), bucket_size
+            bucket(gaussian_filter(rotated_shifted_obj, blur), bucket_size
                    )[0, crop:-crop, crop:-crop])
-        expected_phases[s, :, :] = np.angle(np.fft.fftshift(
-            expected_cross_power_spectrum((y/bucket_size[1], x/bucket_size[2]),
-                                          k_ud, k_lr), axes=0))
-    np_tif.array_to_tif(expected_phases, 'DEBUG_expected_phase_vs_ref.tif')
     np_tif.array_to_tif(stack, 'DEBUG_stack.tif')
     print(" Done.")
+    print("Rotationally registering test stack...")
+    calculated_angles = stack_rotational_registration(
+        stack,
+        refinement='spike_interpolation',
+        register_in_place=True,
+        debug=True)
     print("Registering test stack...")
     calculated_shifts = stack_registration(
         stack,
@@ -560,3 +605,5 @@ if __name__ == '__main__':
     for s, cs in zip(shifts, calculated_shifts):
         print('%0.2f (%i)'%(cs[0] * bucket_size[1], s[0]),
               '%0.2f (%i)'%(cs[1] * bucket_size[2], s[1]))
+    for a, ca in zip(angles_deg, calculated_angles):
+        print('%0.2f (%i)'%(ca, a))
