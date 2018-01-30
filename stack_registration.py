@@ -237,6 +237,7 @@ def stack_rotational_registration(
     refinement='spike_interpolation',
     register_in_place=True,
     fourier_cutoff_radius=None,
+    fail_180_test='fix_but_print_warning',
     debug=False,):
     """Calculate rotations which would rotationally register the slices
     of a three-dimensional stack `s`, and optionally rotate the stack
@@ -260,6 +261,16 @@ def stack_rotational_registration(
     frequencies higher than this cutoff, since they're probably lousy
     due to aliasing and noise anyway. If `None`, attempt to estimate a
     resonable cutoff.
+
+    'fail_180_test': One of 'fix_but_print_warning', (the default),
+    'fix_silently', 'ignore_silently', or 'raise_exception'. The
+    algorithm employed here has a fundamental ambiguity: due to
+    symmetries in the Fourier domain under 180 degree rotations, the
+    rotational registration won't return rotations bigger than +/- 90
+    degrees. We currently have a lousy correlation-based check to detect
+    if slice(s) in your stack seem to need bigger rotations to align
+    with the reference slice. What would you like to happen when this
+    warning triggers?
     """
     assert len(s.shape) == 3
     try:
@@ -286,6 +297,10 @@ def stack_rotational_registration(
     if fourier_cutoff_radius is None:
         fourier_cutoff_radius = estimate_fourier_cutoff_radius(c, debug=debug)
     assert (0 < fourier_cutoff_radius <= 0.5)
+    assert fail_180_test in ('fix_but_print_warning',
+                             'fix_silently',
+                             'ignore_silently',
+                             'raise_exception')
     assert debug in (True, False)
     if debug and np_tif is None:
         raise UserWarning("Failed to import np_tif; no debug mode.")
@@ -301,6 +316,7 @@ def stack_rotational_registration(
     mask =  (mask_r_sq <= max_r_sq) * np.cos((np.pi/2)*(mask_r_sq/max_r_sq))
     del mask_ud, mask_lr, mask_r_sq
     masked_reference_slice = align_to_this_slice * mask
+    small_ref = bucket(masked_reference_slice, (4, 4))
     ## We'll base our rotational registration on the logarithms of the
     ## amplitudes of the low spatial frequencies of the reference and
     ## target slices. We'll need the amplitudes of the Fourier transform
@@ -346,8 +362,8 @@ def stack_rotational_registration(
         ## Compute the polar transform of the log of the amplitude
         ## spectrum of our masked slice:
         current_slice = c[which_slice, :, :] * mask
-        current_slice_ft_log_amp = np.log(np.abs(np.fft.fftshift(np.fft.rfftn(
-            current_slice), axes=0)))
+        current_slice_ft_log_amp = np.log(np.abs(np.fft.fftshift(
+            np.fft.rfftn(current_slice), axes=0)))
         polar_slice = map_coordinates(current_slice_ft_log_amp, (k_y, k_x))
         ## Register the polar transform of the current slice against the
         ## polar transform of the reference slice, using a similar
@@ -376,7 +392,33 @@ def stack_rotational_registration(
         ## Convert our shift into a signed number near zero:
         loc = (loc + spike.shape[1]//2) % spike.shape[1] - spike.shape[1]//2
         ## Convert this shift in "theta pixels" back to a rotation in degrees:
-        registration_rotations_degrees.append(loc * k_theta_delta_degrees)
+        angle = loc * k_theta_delta_degrees
+        ## There's a fundamental 180-degree ambiguity in the rotation
+        ## determined by this algorthim. We need to check if adding 180
+        ## degrees explains our data better. This is a half-assed fast
+        ## check that just downsamples the bejesus out of the relevant
+        ## slices and looks at cross-correlation.
+        ## TODO: FIX THIS FOR REAL! ...or does it matter? Testing, for now.
+        small_current_slice = bucket(current_slice, (4, 4))
+        small_cur_000 = rotate(small_current_slice, angle=angle, reshape=False)
+        small_cur_180 = rotate(small_current_slice,
+                               angle=angle+180, reshape=False)
+        if (small_cur_180*small_ref).sum() > (small_cur_000*small_ref).sum():
+            if fail_180_test is 'fix_but_print_warning':
+                angle += 180
+                print(" **Warning: potentially ambiguous rotation detected**")
+                print("   Inspect the registration for rotations off by 180"+
+                      " degrees, at slice %i"%(which_slice))
+            elif fail_180_test is 'fix_silently':
+                angle += 180
+            elif fail_180_test is 'ignore_silently':
+                pass
+            elif fail_180_test is 'raise_exception':
+                raise UserWarning(
+                    "Potentially ambiguous rotation detected.\n"+
+                    "One of your slices needed more than 90 degrees rotation")
+        ## Pencils down.
+        registration_rotations_degrees.append(angle)
         if debug:
             ## Save some intermediate data to help with debugging
             masked_stack[which_slice, :, :] = current_slice
@@ -526,48 +568,48 @@ if __name__ == '__main__':
     crop = 8
     blur = 4
     brightness = 0.1
-##    print("Creating shifted stack from test object...")
-##    shifted_obj = np.zeros_like(obj)
-##    stack = np.zeros((len(shifts),
-##                      obj.shape[1]//bucket_size[1] - 2*crop,
-##                      obj.shape[2]//bucket_size[2] - 2*crop))
-##    expected_phases = np.zeros((len(shifts),) +
-##                               np.fft.rfft(stack[0, :, :]).shape)
-##    k_ud, k_lr = np.fft.fftfreq(stack.shape[1]), np.fft.rfftfreq(stack.shape[2])
-##    k_ud, k_lr = k_ud.reshape(k_ud.size, 1), k_lr.reshape(1, k_lr.size)
-##    for s, (y, x) in enumerate(shifts):
-##        top = max(0, y)
-##        lef = max(0, x)
-##        bot = min(obj.shape[-2], obj.shape[-2] + y)
-##        rig = min(obj.shape[-1], obj.shape[-1] + x)
-##        shifted_obj.fill(0)
-##        shifted_obj[0, top:bot, lef:rig] = obj[0, top-y:bot-y, lef-x:rig-x]
-##        stack[s, :, :] = np.random.poisson(
-##            brightness *
-##            bucket(gaussian_filter(shifted_obj, blur), bucket_size
-##                   )[0, crop:-crop, crop:-crop])
-##        expected_phases[s, :, :] = np.angle(np.fft.fftshift(
-##            expected_cross_power_spectrum((y/bucket_size[1], x/bucket_size[2]),
-##                                          k_ud, k_lr), axes=0))
-##    np_tif.array_to_tif(expected_phases, 'DEBUG_expected_phase_vs_ref.tif')
-##    np_tif.array_to_tif(stack, 'DEBUG_stack.tif')
-##    print(" Done.")
-##    print("Registering test stack...")
-##    calculated_shifts = stack_registration(
-##        stack,
-##        refinement='spike_interpolation',
-##        debug=True)
-##    print(" Done.")
-##    for s, cs in zip(shifts, calculated_shifts):
-##        print('%0.2f (%i)'%(cs[0] * bucket_size[1], s[0]),
-##              '%0.2f (%i)'%(cs[1] * bucket_size[2], s[1]))
-##    input("Hit enter to test rotational registration" + 
-##          " (this will overwrite some of the DEBUG_ files" + 
-##          " from translational registration)")
+    print("Creating shifted stack from test object...")
+    shifted_obj = np.zeros_like(obj)
+    stack = np.zeros((len(shifts),
+                      obj.shape[1]//bucket_size[1] - 2*crop,
+                      obj.shape[2]//bucket_size[2] - 2*crop))
+    expected_phases = np.zeros((len(shifts),) +
+                               np.fft.rfft(stack[0, :, :]).shape)
+    k_ud, k_lr = np.fft.fftfreq(stack.shape[1]), np.fft.rfftfreq(stack.shape[2])
+    k_ud, k_lr = k_ud.reshape(k_ud.size, 1), k_lr.reshape(1, k_lr.size)
+    for s, (y, x) in enumerate(shifts):
+        top = max(0, y)
+        lef = max(0, x)
+        bot = min(obj.shape[-2], obj.shape[-2] + y)
+        rig = min(obj.shape[-1], obj.shape[-1] + x)
+        shifted_obj.fill(0)
+        shifted_obj[0, top:bot, lef:rig] = obj[0, top-y:bot-y, lef-x:rig-x]
+        stack[s, :, :] = np.random.poisson(
+            brightness *
+            bucket(gaussian_filter(shifted_obj, blur), bucket_size
+                   )[0, crop:-crop, crop:-crop])
+        expected_phases[s, :, :] = np.angle(np.fft.fftshift(
+            expected_cross_power_spectrum((y/bucket_size[1], x/bucket_size[2]),
+                                          k_ud, k_lr), axes=0))
+    np_tif.array_to_tif(expected_phases, 'DEBUG_expected_phase_vs_ref.tif')
+    np_tif.array_to_tif(stack, 'DEBUG_stack.tif')
+    print(" Done.")
+    print("Registering test stack...")
+    calculated_shifts = stack_registration(
+        stack,
+        refinement='spike_interpolation',
+        debug=True)
+    print(" Done.")
+    for s, cs in zip(shifts, calculated_shifts):
+        print('%0.2f (%i)'%(cs[0] * bucket_size[1], s[0]),
+              '%0.2f (%i)'%(cs[1] * bucket_size[2], s[1]))
 
     # Now we test rotational alignment, on top of translational alignment
+    input("Hit enter to test rotational registration...\n" + 
+          " (This will overwrite some of the DEBUG_* files" + 
+          " from translational registration)")
     print("Creating rotated and shifted stack from test object...")
-    angles_deg = [360*np.random.random() for s in shifts]
+    angles_deg = [180*np.random.random()-90 for s in shifts]
     angles_deg[0] = 0
     rotated_shifted_obj = np.zeros_like(obj)
     stack = np.zeros((len(shifts),
@@ -596,14 +638,12 @@ if __name__ == '__main__':
         refinement='spike_interpolation',
         register_in_place=True,
         debug=True)
-    print("Registering test stack...")
-    calculated_shifts = stack_registration(
-        stack,
-        refinement='spike_interpolation',
-        debug=True)
-    print(" Done.")
-    for s, cs in zip(shifts, calculated_shifts):
-        print('%0.2f (%i)'%(cs[0] * bucket_size[1], s[0]),
-              '%0.2f (%i)'%(cs[1] * bucket_size[2], s[1]))
+    print("estimated angle (true angle)")
     for a, ca in zip(angles_deg, calculated_angles):
-        print('%0.2f (%i)'%(ca, a))
+        print('%0.2f (%0.2f)'%(ca, -a))
+    input("Second round...")
+    stack_rotational_registration(
+            stack,
+            refinement='spike_interpolation',
+            register_in_place=True,
+            debug=True)
