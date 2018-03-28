@@ -688,6 +688,7 @@ class Display:
         self.commands = commands
         self.display_min = intensity_min.value
         self.display_max = intensity_max.value
+        self.flip_lr, self.flip_ud = False, False
         self.set_intensity_scaling('linear', display_min=0, display_max=2**16-1)
         self.display_data = np.empty(self.buffer_shape[1:], dtype=np.uint8)
         self.projection_buffers[1].get_lock().acquire()
@@ -766,6 +767,10 @@ class Display:
         def on_mouse_motion(x, y, dx, dy):
             self.mouse_hover_x = (x - self.image_x) / self.image_scale
             self.mouse_hover_y = (y - self.image_y) / self.image_scale
+            if self.flip_lr:
+                self.mouse_hover_x = self.image.width - self.mouse_hover_x - 1
+            if self.flip_ud:
+                self.mouse_hover_y = self.image.height - self.mouse_hover_y - 1
         @self.window.event
         def on_mouse_leave(x, y):
             self.mouse_hover_x, self.mouse_hover_y = -1, -1
@@ -865,8 +870,15 @@ class Display:
         elif cmd == 'withdraw':
             self.window.set_visible(False)
             self.commands.send(None)
+        elif cmd == 'set_orientation':
+            self.flip_lr = args.get('flip_lr', self.flip_lr)
+            self.flip_ud = args.get('flip_ud', self.flip_ud)
+            self.commands.send({'flip_lr': self.flip_lr,
+                                'flip_ud': self.flip_ud})
         else:
             info("Command not recognized: " + cmd)
+            raise UserWarning('Command not recognized: `%s`' % cmd)
+                ## TODO: Extend this to other child processes?
         return None
 
     def switch_buffers(self, switch_to_me):
@@ -908,6 +920,10 @@ class Display:
         Convert 16-bit projections to 8-bit display data using a lookup table.
         """
         np.take(self.lut, self.projection_data, out=self.display_data)
+        if self.flip_lr:
+            self.display_data[:] = self.display_data[:, ::-1]
+        if self.flip_ud:
+            self.display_data[:] = self.display_data[::-1, :]
         self.image = self._array_to_image(self.display_data, allow_copy=False)
         self.pyg.gl.glTexParameteri( #Reset to no interpolation
                 self.pyg.gl.GL_TEXTURE_2D,
