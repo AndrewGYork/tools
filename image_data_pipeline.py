@@ -14,6 +14,7 @@ import numpy as np
 # import theimagingsource # The "Camera" child process might import this
 # import pyglet # The "Display" child process will import these
 # from arrayimage import ArrayInterfaceImage
+# import warnings
 # from scipy import ndimage # The "Display" child process attempts this import
 # import np_tif # The "File Saving" child process will import this
 """
@@ -659,10 +660,13 @@ class Display:
         intensity_min,
         intensity_max
         ):
+        import warnings
         import pyglet
         self.pyg = pyglet
         try:
-            from arrayimage import ArrayInterfaceImage
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                from arrayimage import ArrayInterfaceImage
         except ImportError:
             info("'arrayimage' not found. Go get it from:")
             info('https://github.com/AndrewGYork/tools/blob/master/arrayimage.py')

@@ -31,12 +31,21 @@
 # ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 # POSSIBILITY OF SUCH DAMAGE.
 # ----------------------------------------------------------------------------
-
+import warnings
 from pyglet.image import ImageData
 import ctypes
 
 __version__ = '0.0.7' # keep in sync with ../setup.py
 __all__ = ['ArrayInterfaceImage']
+
+warnings.warn("\n\n" + "*"*40 + "\nWARNING!\n" + "*"*40 + "\n\n"
+              "You imported arrayimage.py\n"
+              "You probably shouldn't be importing this module.\n"
+              "Among the side effects, if used wrong:"
+              " high CPU load on Windows.\n"
+              "If you know what you're doing,"
+              " use the python `warnings` module to swallow this warning.",
+              UserWarning)
 
 def is_c_contiguous(inter):
     strides = inter.get('strides')
