@@ -98,6 +98,11 @@ class Image_Data_Pipeline:
                 self.projection.projection_buffer_output_queue),
             projection_buffer_output_queue=(
                 self.projection.projection_buffer_input_queue))
+        self._children = [self.camera.child,
+                          self.accumulation.child,
+                          self.file_saving.child,
+                          self.projection.child,
+                          self.display.child]
         return None
 
     def apply_camera_settings(
@@ -244,11 +249,7 @@ class Image_Data_Pipeline:
         """
         It's good to periodically check if your children have died.
         """
-        return {'Camera': self.camera.child.is_alive(),
-                'Accumulation': self.accumulation.child.is_alive(),
-                'File Saving': self.file_saving.child.is_alive(),
-                'Projection': self.projection.child.is_alive(),
-                'Display': self.display.child.is_alive()}
+        return {c.name: c.is_alive() for c in self._children}
 
     def close(self):
         self.camera.input_queue.put(None)
