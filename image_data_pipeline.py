@@ -79,6 +79,7 @@ class Image_Data_Pipeline:
             data_buffers=self.data_buffers,
             buffer_shape=self.buffer_shape,
             input_queue=self.accumulation.output_queue)
+        self.final_output_queue = self.file_saving.output_queue
         # These processes are downstream of the accumulation process,
         # but not in the same loop as the camera or file saving
         # processes.
@@ -231,7 +232,7 @@ class Image_Data_Pipeline:
         num_collected = 0
         while True:
             try:
-                strip_me = self.file_saving.output_queue.get_nowait()
+                strip_me = self.final_output_queue.get_nowait()
             except Q.Empty:
                 break
             num_collected += 1
