@@ -2,32 +2,37 @@ import time
 import ctypes as C
 import numpy as np
 
-class Edge:
-    def __init__(self, pco_edge_type='4.2', verbose=True, very_verbose=False):
-        assert pco_edge_type in ('4.2', '5.5')
-        self.pco_edge_type = pco_edge_type
+class Camera:
+    def __init__(self, camera_type='edge 4.2', verbose=True, very_verbose=False):
+        assert camera_type in ('edge 4.2', 'edge 5.5', 'pixelfly')
+        self.camera_type = camera_type
         self.verbose = verbose
         self.very_verbose = very_verbose
         self.camera_handle = C.c_void_p(0)
-        if verbose: print("Opening pco.edge camera...")
+        if verbose: print("Opening pco.%s camera..."%self.camera_type)
         try:
-            assert self.camera_handle.value is None
+            # This command opens the next pco camera; if you want to
+            # have multiple cameras, and pick which one you're opening,
+            # I'd have to implement PCO_OpenCameraEx, which would
+            # require me to understand PCO_OpenStruct.
             dll.open_camera(self.camera_handle, 0)
             assert self.camera_handle.value is not None
         except (WindowsError, AssertionError):
-            print("Failed to open pco.edge camera.")
+            print("Failed to open pco.%s camera."%self.camera_type)
             print(" *Is the camera on, and plugged into the computer?")
             print(" *Is CamWare running? It shouldn't be!")
-            print(" *Is sc2_cl_me4.dll in the same directory as SC2_Cam.dll?")
+            print(" *If using a CameraLink camera, is sc2_cl_me4.dll in",
+                  "the same directory as SC2_Cam.dll?")
             raise
-        if self.verbose: print(" Camera open.")
+        if self.verbose: print(" pco.%s camera open." % self.camera_type)
+        dll.reset_settings_to_default(self.camera_handle)
         self.disarm()
         self._refresh_camera_setting_attributes()
         return None                            
 
     def close(self):
-        if self.armed: self.disarm()
-        if self.verbose: print("Closing pco.edge camera...")
+        self.disarm()
+        if self.verbose: print("Closing pco.%s camera..." % self.camera_type)
         dll.close_camera(self.camera_handle)
         if self.verbose: print(" Camera closed.")
         return None
@@ -59,9 +64,10 @@ class Edge:
         dll.reset_settings_to_default(self.camera_handle)        
         self._set_sensor_format('standard')
         self._set_acquire_mode('auto')
-        self._set_pixel_rate({'4.2': 272250000,
-                              '5.5': 286000000
-                              }[self.pco_edge_type])
+        self._set_pixel_rate({'edge 4.2': 272250000,
+                              'edge 5.5': 286000000,
+                              'pixelfly':  24000000 # Read from camera once
+                              }[self.camera_type])
         """
         I think these settings don't matter for the pco.edge, but just
         in case...
@@ -88,7 +94,7 @@ class Edge:
         assert 1 <= num_buffers <= 16
         if self.armed:
             if self.verbose:
-                print('Arm requested, but the pco.edge camera'
+                print('Arm requested, but the pco camera'
                       'is already armed. Disarming...')
             self.disarm()
         if self.verbose: print("Arming camera...") 
@@ -144,9 +150,14 @@ class Edge:
         return None
 
     def disarm(self):
+        if not hasattr(self, 'armed'):
+            self.armed = False
+        if not self.armed:
+            if self.camera_type == 'pixelfly': 
+                return None # pixelfly throws an error if disarmed twice
         if self.verbose: print("Disarming camera...")
         dll.set_recording_state(self.camera_handle, 0)
-        dll.remove_buffer(self.camera_handle)
+        dll.cancel_images(self.camera_handle)
         if hasattr(self, 'buffer_pointers'): #free allocated buffers
             for buf in range(len(self.buffer_pointers)):
                 dll.free_buffer(self.camera_handle, buf)
@@ -294,7 +305,7 @@ class Edge:
           relevant value(s). This is slower, because you have to wait for
           round-trip communication, but gets you up-to-date info.
 
-         2. Access an attribute of the Edge object, e.g. self.roi
+         2. Access an attribute of the camera object, e.g. self.roi
 
           This ignores the camera, which is very fast, but the resulting
           value could potentially be inconsistent with the camera's true
@@ -409,7 +420,8 @@ class Edge:
     def _set_trigger_mode(self, mode="auto_trigger"):
         trigger_mode_numbers = {
             "auto_trigger": 0,
-            "external_trigger": 2}
+            "software_trigger": 1,
+            "external_trigger": 2} 
         if self.verbose: print(" Setting trigger mode to:", mode)
         dll.set_trigger_mode(self.camera_handle, trigger_mode_numbers[mode])
         assert self._get_trigger_mode() == mode
@@ -550,10 +562,15 @@ class Edge:
         and the 5.5 take ~10 ms to roll the full chip. Calculate the
         fraction of the chip we're using and estimate the rolling time.
         """
-        if self.pco_edge_type == '4.2':
+        if self.camera_type == 'edge 4.2':
             max_lines = 1024
-        elif self.pco_edge_type == '5.5':
+        elif self.camera_type == 'edge 5.5':
             max_lines = 1080
+        # TODO calculate rollingtime for pixelfly...better
+        elif self.camera_type == 'pixelfly': 
+            full_chip_rolling_time = 7.5e4
+            self.rolling_time_microseconds = full_chip_rolling_time
+            return self.roi
         full_chip_rolling_time = 1e4
         chip_fraction = max(wRoiY1.value - max_lines,
                             max_lines + 1 - wRoiY0.value) / max_lines
@@ -565,7 +582,7 @@ class Edge:
 
         Note that this method fills in some of the arguments for you.
         """
-        return legalize_roi(roi, self.pco_edge_type, self.roi, self.verbose)
+        return legalize_roi(roi, self.camera_type, self.roi, self.verbose)
     
     def _set_roi(self, region_of_interest):
         roi = self._legalize_roi(region_of_interest)
@@ -576,7 +593,7 @@ class Edge:
 
 def legalize_roi(
     roi,
-    pco_edge_type='4.2',
+    camera_type='edge 4.2',
     current_roi=None,
     verbose=True):
     """
@@ -596,10 +613,12 @@ def legalize_roi(
         print("  From pixel", left, "to pixel", right, "(left/right)")
         print("  From pixel", top, "to pixel", bottom, "(up/down)")
     min_lr, min_ud, min_height = 1, 1, 10
-    if pco_edge_type == '4.2':
+    if camera_type == 'edge 4.2':
         max_lr, max_ud, min_width, step_lr = 2060, 2048, 40, 20
-    elif pco_edge_type == '5.5':
+    elif camera_type == 'edge 5.5':
         max_lr, max_ud, min_width, step_lr = 2560, 2160, 160, 160
+    elif camera_type == 'pixelfly':
+        max_lr, max_ud, min_width, step_lr = 1392, 1040, 1392, 1040
     if current_roi is None:
         current_roi = {'left': min_lr, 'right':  max_lr,
                        'top':  min_ud, 'bottom': max_ud}
@@ -680,18 +699,18 @@ def legalize_roi(
         print(" ***Requested ROI must be adjusted to match the camera***")
     return new_roi
 
-def pco_edge_camera_child_process(
+def pco_camera_child_process(
     data_buffers,
     buffer_shape,
     input_queue,
     output_queue,
     commands,
-    pco_edge_type='4.2' #Change this if you're using a 5.5
+    camera_type='edge 4.2' #Change this if you're using a edge 5.5 or pixelfly
     ):
     """For use with image_data_pipeline.py
 
     https://github.com/AndrewGYork/tools/blob/master/image_data_pipeline.py
-    Debugged for the 4.2, but might work for the 5.5, with some TLC...
+    Debugged for the edge 4.2, less so for the edge 5.5 and pixelfly.
     """
     from image_data_pipeline import info, Q, sleep, clock
     try:
@@ -702,7 +721,7 @@ def pco_edge_camera_child_process(
         raise
     buffer_size = np.prod(buffer_shape)
     info("Initializing...")
-    camera = pco.Edge(pco_edge_type=pco_edge_type, verbose=False)
+    camera = pco.Camera(camera_type=camera_type, verbose=False)
     camera.apply_settings(trigger='auto_trigger')
     camera.arm(num_buffers=3)
     info("Done initializing")
@@ -821,11 +840,7 @@ except WindowsError:
     print("You need this to run pco.py")
     raise
 
-"""
-This command opens the next pco camera; if you want to have multiple
-cameras, and pick which one you're opening, I'd have to implement
-PCO_OpenCameraEx, which would require me to understand PCO_OpenStruct.
-"""
+
 dll.open_camera = dll.PCO_OpenCamera
 dll.open_camera.argtypes = [C.POINTER(C.c_void_p), C.c_uint16]
 
@@ -950,6 +965,9 @@ dll.set_recording_state.argtypes = [C.c_void_p, C.c_uint16]
 dll.remove_buffer = dll.PCO_RemoveBuffer
 dll.remove_buffer.argtypes = [C.c_void_p]
 
+dll.cancel_images = dll.PCO_CancelImages
+dll.cancel_images.argtypes = [C.c_void_p]
+
 dll.free_buffer = dll.PCO_FreeBuffer
 dll.free_buffer.argtypes = [C.c_void_p, C.c_int16]
 
@@ -972,40 +990,71 @@ dll.set_storage_mode = dll.PCO_SetStorageMode
 dll.set_storage_mode.argtypes = [C.c_void_p, C.c_uint16]
 
 if __name__ == '__main__':
-    """
-    Half-assed testing; give randomized semi-garbage inputs, hope the
-    plane don't crash.
-    """
-    camera = Edge()
-    for i in range(10000):
-        """
-        Random exposure time, biased towards shorter exposures
-        """
-        exposure = min(np.random.randint(1e2, 1e7, size=40))
-        """
-        Random ROI, potentially with some/all limits unspecified.
-        """
-        roi = {
-            'top': np.random.randint(low=-2000, high=3000),
-            'bottom': np.random.randint(low=-2000, high=3000),
-            'left': np.random.randint(low=-2000, high=3000),
-            'right': np.random.randint(low=-2000, high=3000)}
-        roi = {k: v for k, v in roi.items() if v > -10} #Delete some keys/vals
-        camera.apply_settings(exposure_time_microseconds=exposure,
-                              region_of_interest=roi)
-        camera.arm(num_buffers=np.random.randint(1, 16))
-        print("Allocating memory...")
-        images = np.zeros((np.random.randint(1, 5), camera.height, camera.width),
-                          dtype=np.uint16)
-        print("Done allocating memory.")
-        print("Expected time:",
-              images.shape[0] *
-              1e-6 * max(camera.rolling_time_microseconds,
-                         camera.exposure_time_microseconds))
-        start = time.perf_counter()
-        camera.record_to_memory(num_images=images.shape[0], out=images)
-        print("Elapsed time:", time.perf_counter() - start)
-        
-        print(images.min(), images.max(), images.shape)
+    camera_to_test = 'pixelfly' # {'edge 4.2', 'pixelfly'} 
+
+    if camera_to_test == 'edge 4.2':
+        """ Half-assed edge testing; give randomized semi-garbage inputs, hope
+            the plane don't crash. """
+        camera = Camera(camera_type='edge 4.2', verbose=True, very_verbose=True)
+        for i in range(10000):
+            """
+            Random exposure time, biased towards shorter exposures
+            """
+            exposure = min(np.random.randint(1e2, 1e7, size=40))
+            """
+            Random ROI, potentially with some/all limits unspecified.
+            """
+            roi = {
+                'top': np.random.randint(low=-2000, high=3000),
+                'bottom': np.random.randint(low=-2000, high=3000),
+                'left': np.random.randint(low=-2000, high=3000),
+                'right': np.random.randint(low=-2000, high=3000)}
+            #Delete some keys/vals
+            roi = {k: v for k, v in roi.items() if v > -10} 
+            camera.apply_settings(exposure_time_microseconds=exposure,
+                                  region_of_interest=roi)
+            camera.arm(num_buffers=np.random.randint(1, 16))
+            print("Allocating memory...")
+            images = np.zeros((np.random.randint(1, 5),
+                               camera.height,
+                               camera.width),
+                              dtype=np.uint16)
+            print("Done allocating memory.")
+            print("Expected time:",
+                  images.shape[0] *
+                  1e-6 * max(camera.rolling_time_microseconds,
+                             camera.exposure_time_microseconds))
+            start = time.perf_counter()
+            camera.record_to_memory(num_images=images.shape[0], out=images)
+            print("Elapsed time:", time.perf_counter() - start)
+            
+            print(images.min(), images.max(), images.shape)
+            assert 0 < images.min() < images.max()
+            camera.disarm()
+        camera.close()
+
+    elif camera_to_test == 'pixelfly':
+        camera = Camera(camera_type='pixelfly', verbose=True, very_verbose=True) 
+        for i in range(10000):
+            """
+            Random exposure time, biased towards shorter exposures
+            """
+            exposure = min(np.random.randint(5e3, 1e7, size=40))
+            camera.apply_settings(exposure_time_microseconds=exposure)
+            camera.arm(num_buffers=np.random.randint(1, 16))
+            print("Allocating memory...")
+            images = np.zeros((np.random.randint(1, 5), camera.height, camera.width),
+                              dtype=np.uint16)
+            print("Done allocating memory.")
+            print("Expected time:",
+                  images.shape[0] *
+                  1e-6 * max(camera.rolling_time_microseconds,
+                             camera.exposure_time_microseconds))
+            start = time.perf_counter()
+            camera.record_to_memory(num_images=images.shape[0], out=images)
+            print("Elapsed time:", time.perf_counter() - start)
+            print(images.min(), images.max(), images.shape)
+            assert 0 < images.min() < images.max()
+        camera.arm()
         camera.disarm()
-    camera.close()
+        camera.close()
