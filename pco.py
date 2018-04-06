@@ -3,13 +3,11 @@ import ctypes as C
 import numpy as np
 
 class Camera:
-    def __init__(self, camera_type='edge 4.2', verbose=True, very_verbose=False):
-        assert camera_type in ('edge 4.2', 'edge 5.5', 'pixelfly')
-        self.camera_type = camera_type
+    def __init__(self, verbose=True, very_verbose=False):
         self.verbose = verbose
         self.very_verbose = very_verbose
         self.camera_handle = C.c_void_p(0)
-        if verbose: print("Opening pco.%s camera..."%self.camera_type)
+        if verbose: print("Opening pco camera...")
         try:
             # This command opens the next pco camera; if you want to
             # have multiple cameras, and pick which one you're opening,
@@ -24,6 +22,7 @@ class Camera:
             print(" *If using a CameraLink camera, is sc2_cl_me4.dll in",
                   "the same directory as SC2_Cam.dll?")
             raise
+        self._get_camera_type()
         if self.verbose: print(" pco.%s camera open." % self.camera_type)
         dll.reset_settings_to_default(self.camera_handle)
         self.disarm()
@@ -66,7 +65,8 @@ class Camera:
         self._set_acquire_mode('auto')
         self._set_pixel_rate({'edge 4.2': 272250000,
                               'edge 5.5': 286000000,
-                              'pixelfly':  24000000 # Read from camera once
+                              'pixelfly':  24000000, # Read from camera once
+                              'panda 4.2': 0, # TODO: This can't be right(?)
                               }[self.camera_type])
         """
         I think these settings don't matter for the pco.edge, but just
@@ -86,8 +86,11 @@ class Camera:
         predictable: it should all be zeros.
         """
         camera_health = self._get_camera_health()
-        for v in camera_health.values():
-            assert v == 0
+        for k, v in camera_health.items():
+            if k == 'status' and self.camera_type == 'panda 4.2':
+                assert v == 16
+            else:
+                assert v == 0
         return None
 
     def arm(self, num_buffers=2):
@@ -210,14 +213,14 @@ class Camera:
             we exit this 'while' loop are by getting a buffer or running
             out of patience.
             """
-            num_polls = 0
-            num_sleeps = 0
+            self.num_polls = 0
+            self.num_sleeps = 0
             start_time = time.perf_counter()
             while True:
                 """
                 Check if a buffer is ready
                 """
-                num_polls += 1
+                self.num_polls += 1
                 dll.get_buffer_status(
                     self.camera_handle,
                     self.added_buffers[0],
@@ -226,7 +229,7 @@ class Camera:
                 if self._dll_status.value == 0xc0008000:
                     buffer_number = self.added_buffers.pop(0)#Removed from queue
                     if self.very_verbose:
-                        print(" After", num_polls, "polls and", num_sleeps,
+                        print(" After", self.num_polls, "polls and", self.num_sleeps,
                               "sleeps, buffer", buffer_number, "is ready.")
                     break
                 """
@@ -238,21 +241,21 @@ class Camera:
                 if self.exposure_time_microseconds > 30e3:
                     time.sleep(self.exposure_time_microseconds * 1e-6 * #seconds
                                2 / sleep_timeout) #Worst case
-                    num_sleeps += 1
+                    self.num_sleeps += 1
                 """
                 At some point we have to admit we probably missed a
                 trigger, and give up. Give up after too many polls
                 (likely triggered by short exposures) or too many sleeps
                 (likely triggered by long exposures)
                 """
-                if num_polls > poll_timeout or num_sleeps > sleep_timeout:
+                if self.num_polls > poll_timeout or self.num_sleeps > sleep_timeout:
                     elapsed_time = time.perf_counter() - start_time
                     if which_im == 0: # First image; maybe keep waiting...
                         if elapsed_time < first_trigger_timeout_seconds:
                             continue
                     raise TimeoutError(
-                        "After %i polls,"%(num_polls) + 
-                        " %i sleeps"%(num_sleeps) + 
+                        "After %i polls,"%(self.num_polls) + 
+                        " %i sleeps"%(self.num_sleeps) + 
                         " and %0.3f seconds,"%(elapsed_time) + 
                         " no buffer. (%i acquired)"%(num_acquired),
                         num_acquired=num_acquired)
@@ -316,6 +319,7 @@ class Camera:
         nervous, I guess.
         """
         if self.verbose: print("Retrieving settings from camera...")
+        self._get_camera_type()
         self._get_sensor_format()
         self._get_trigger_mode()
         self._get_storage_mode()
@@ -496,7 +500,10 @@ class Camera:
     def _get_pixel_rate(self):
         dwPixelRate = C.c_uint32(0)
         dll.get_pixel_rate(self.camera_handle, dwPixelRate)
-        assert dwPixelRate.value != 0
+        if self.camera_type == 'panda 4.2':
+            assert dwPixelRate.value == 0 ## TODO: This can't be right(?)
+        else:
+            assert dwPixelRate.value != 0
         if self.very_verbose: print(" Pixel rate:", dwPixelRate.value)
         self.pixel_rate = dwPixelRate.value
         return self.pixel_rate
@@ -534,15 +541,23 @@ class Camera:
 
     def _set_exposure_time(self, exposure_time_microseconds=2200):
         exposure_time_microseconds = int(exposure_time_microseconds)
-        assert 1e2 <= exposure_time_microseconds <= 1e7
+        if self.camera_type in ('edge 4.2', 'edge 5.5', 'pixelfly'):
+            assert 1e2 <= exposure_time_microseconds <= 1e7
+        elif self.camera_type == 'panda 4.2':
+            ## TODO: is the minimum exposure really 9 us?
+            assert 9 <= exposure_time_microseconds <= 1e7
         if self.verbose:
             print(" Setting exposure time to", exposure_time_microseconds, "us")
         dll.set_delay_exposure_time(
             self.camera_handle, 0, exposure_time_microseconds, 1, 1)
-        assert self._get_exposure_time() == exposure_time_microseconds
+        self._get_exposure_time()
+        if self.camera_type == 'panda 4.2':
+            assert abs(self.exposure_time_microseconds -
+                       exposure_time_microseconds) <= 13
+        else:
+            assert self.exposure_time_microseconds == exposure_time_microseconds
         return self.exposure_time_microseconds
 
-    
     def _get_roi(self):
         wRoiX0, wRoiY0, wRoiX1, wRoiY1 = (
             C.c_uint16(), C.c_uint16(),
@@ -564,14 +579,18 @@ class Camera:
         """
         if self.camera_type == 'edge 4.2':
             max_lines = 1024
+            full_chip_rolling_time = 1e4
         elif self.camera_type == 'edge 5.5':
             max_lines = 1080
-        # TODO calculate rollingtime for pixelfly...better
+            full_chip_rolling_time = 1e4
+        elif self.camera_type == 'panda 4.2':
+            max_lines = 1024
+            full_chip_rolling_time = 2.5e4 # TODO: verify rolling time for panda
+        # TODO: calculate rolling time for pixelfly...better
         elif self.camera_type == 'pixelfly': 
             full_chip_rolling_time = 7.5e4
             self.rolling_time_microseconds = full_chip_rolling_time
             return self.roi
-        full_chip_rolling_time = 1e4
         chip_fraction = max(wRoiY1.value - max_lines,
                             max_lines + 1 - wRoiY0.value) / max_lines
         self.rolling_time_microseconds =  full_chip_rolling_time * chip_fraction
@@ -590,6 +609,19 @@ class Camera:
                     roi['left'], roi['top'], roi['right'], roi['bottom'])
         assert self._get_roi() == roi
         return self.roi
+    
+    def _get_camera_type(self):
+        camera_name = C.c_char_p(b' '*40)
+        dll.get_camera_name(self.camera_handle, camera_name, 40)
+        name2type = {'pco.edge rolling shutter 4.2': 'edge 4.2',
+                     'pco.edge 5.5': 'edge 5.5', # This is probably wrong
+                     'pco.panda 4.2': 'panda 4.2',
+                     'pco.USB.Pixel.Fly': 'pixelfly'}
+        try:
+            self.camera_type = name2type[camera_name.value.decode('ascii')]
+        except KeyError:
+            raise UserWarning('Unexpected camera type - %s' % camera_name.value)       
+        return self.camera_type
 
 def legalize_roi(
     roi,
@@ -612,13 +644,20 @@ def legalize_roi(
         print(" Requested camera ROI:")
         print("  From pixel", left, "to pixel", right, "(left/right)")
         print("  From pixel", top, "to pixel", bottom, "(up/down)")
-    min_lr, min_ud, min_height = 1, 1, 10
+    min_lr, min_ud = 1, 1
     if camera_type == 'edge 4.2':
-        max_lr, max_ud, min_width, step_lr = 2060, 2048, 40, 20
+        min_width, min_height = 40, 10
+        max_lr, max_ud, step_lr, = 2060, 2048, 20
     elif camera_type == 'edge 5.5':
-        max_lr, max_ud, min_width, step_lr = 2560, 2160, 160, 160
+        min_width, min_height = 160, 10
+        max_lr, max_ud, step_lr = 2560, 2160, 160
     elif camera_type == 'pixelfly':
-        max_lr, max_ud, min_width, step_lr = 1392, 1040, 1392, 1040
+        min_width, min_height = 1392, 1040
+        max_lr, max_ud, step_lr = 1392, 1040, 1392
+    elif camera_type == 'panda 4.2':
+        ## TODO: 152 should probably change to 16 after a firmware update
+        min_width, min_height = 152, 10
+        max_lr, max_ud, step_lr = 2048, 2048, 8
     if current_roi is None:
         current_roi = {'left': min_lr, 'right':  max_lr,
                        'top':  min_ud, 'bottom': max_ud}
@@ -705,12 +744,11 @@ def pco_camera_child_process(
     input_queue,
     output_queue,
     commands,
-    camera_type='edge 4.2' #Change this if you're using a edge 5.5 or pixelfly
     ):
     """For use with image_data_pipeline.py
 
     https://github.com/AndrewGYork/tools/blob/master/image_data_pipeline.py
-    Debugged for the edge 4.2, less so for the edge 5.5 and pixelfly.
+    Debugged for the edge 4.2, less so for the edge 5.5, pixelfly and panda 4.2.
     """
     from image_data_pipeline import info, Q, sleep, clock
     try:
@@ -721,7 +759,7 @@ def pco_camera_child_process(
         raise
     buffer_size = np.prod(buffer_shape)
     info("Initializing...")
-    camera = pco.Camera(camera_type=camera_type, verbose=False)
+    camera = pco.Camera(verbose=False)
     camera.apply_settings(trigger='auto_trigger')
     camera.arm(num_buffers=3)
     info("Done initializing")
@@ -956,6 +994,12 @@ dll.set_roi.argtypes = [
     C.c_uint16,
     C.c_uint16]
 
+dll.get_camera_name = dll.PCO_GetCameraName
+dll.get_camera_name.argtype = [
+    C.c_void_p,
+    C.c_char_p,
+    C.c_uint16]
+
 dll.reset_settings_to_default = dll.PCO_ResetSettingsToDefault
 dll.reset_settings_to_default.argtypes = [C.c_void_p]
 
@@ -990,71 +1034,49 @@ dll.set_storage_mode = dll.PCO_SetStorageMode
 dll.set_storage_mode.argtypes = [C.c_void_p, C.c_uint16]
 
 if __name__ == '__main__':
-    camera_to_test = 'pixelfly' # {'edge 4.2', 'pixelfly'} 
-
-    if camera_to_test == 'edge 4.2':
-        """ Half-assed edge testing; give randomized semi-garbage inputs, hope
-            the plane don't crash. """
-        camera = Camera(camera_type='edge 4.2', verbose=True, very_verbose=True)
-        for i in range(10000):
-            """
-            Random exposure time, biased towards shorter exposures
-            """
-            exposure = min(np.random.randint(1e2, 1e7, size=40))
-            """
-            Random ROI, potentially with some/all limits unspecified.
-            """
-            roi = {
-                'top': np.random.randint(low=-2000, high=3000),
-                'bottom': np.random.randint(low=-2000, high=3000),
-                'left': np.random.randint(low=-2000, high=3000),
-                'right': np.random.randint(low=-2000, high=3000)}
-            #Delete some keys/vals
-            roi = {k: v for k, v in roi.items() if v > -10} 
-            camera.apply_settings(exposure_time_microseconds=exposure,
-                                  region_of_interest=roi)
-            camera.arm(num_buffers=np.random.randint(1, 16))
-            print("Allocating memory...")
-            images = np.zeros((np.random.randint(1, 5),
-                               camera.height,
-                               camera.width),
-                              dtype=np.uint16)
-            print("Done allocating memory.")
-            print("Expected time:",
-                  images.shape[0] *
-                  1e-6 * max(camera.rolling_time_microseconds,
-                             camera.exposure_time_microseconds))
-            start = time.perf_counter()
-            camera.record_to_memory(num_images=images.shape[0], out=images)
-            print("Elapsed time:", time.perf_counter() - start)
-            
-            print(images.min(), images.max(), images.shape)
-            assert 0 < images.min() < images.max()
-            camera.disarm()
-        camera.close()
-
-    elif camera_to_test == 'pixelfly':
-        camera = Camera(camera_type='pixelfly', verbose=True, very_verbose=True) 
-        for i in range(10000):
-            """
-            Random exposure time, biased towards shorter exposures
-            """
-            exposure = min(np.random.randint(5e3, 1e7, size=40))
-            camera.apply_settings(exposure_time_microseconds=exposure)
-            camera.arm(num_buffers=np.random.randint(1, 16))
-            print("Allocating memory...")
-            images = np.zeros((np.random.randint(1, 5), camera.height, camera.width),
-                              dtype=np.uint16)
-            print("Done allocating memory.")
-            print("Expected time:",
-                  images.shape[0] *
-                  1e-6 * max(camera.rolling_time_microseconds,
-                             camera.exposure_time_microseconds))
-            start = time.perf_counter()
-            camera.record_to_memory(num_images=images.shape[0], out=images)
-            print("Elapsed time:", time.perf_counter() - start)
-            print(images.min(), images.max(), images.shape)
-            assert 0 < images.min() < images.max()
-        camera.arm()
+    camera = Camera(verbose=True, very_verbose=True)
+    """ Half-assed edge testing; give randomized semi-garbage inputs, hope
+        the plane don't crash. """
+    blank_frames = 0
+    for i in range(10000):
+        """
+        Random exposure time, biased towards shorter exposures
+        """
+        exposure = min(np.random.randint(1e2, 1e7, size=40))
+        """
+        Random ROI, potentially with some/all limits unspecified.
+        """
+        roi = {
+            'top': np.random.randint(low=-2000, high=3000),
+            'bottom': np.random.randint(low=-2000, high=3000),
+            'left': np.random.randint(low=-2000, high=3000),
+            'right': np.random.randint(low=-2000, high=3000)}
+        #Delete some keys/vals
+        roi = {k: v for k, v in roi.items() if v > -10} 
+        camera.apply_settings(exposure_time_microseconds=exposure,
+                              region_of_interest=roi)
+        num_buffers = np.random.randint(1, 16)
+        camera.arm(num_buffers=num_buffers)
+        print("Allocating memory...")
+        images = np.zeros((np.random.randint(1, 5),
+                           camera.height,
+                           camera.width),
+                          dtype=np.uint16)
+        print("Done allocating memory.")
+        print("Expected time:",
+              images.shape[0] *
+              1e-6 * max(camera.rolling_time_microseconds,
+                         camera.exposure_time_microseconds))
+        start = time.perf_counter()
+        camera.record_to_memory(num_images=images.shape[0], out=images,
+                                first_trigger_timeout_seconds=5)
+        print("Elapsed time:", time.perf_counter() - start)            
+        print(images.min(axis=(1, 2)), images.max(axis=(1, 2)),
+              images.shape)
+        if not 0 < images.min() < images.max():
+            blank_frames += 1
+            print('Blank frame received (%d total)' % blank_frames)
         camera.disarm()
-        camera.close()
+    print("%d blank frames received from %s during test" % (blank_frames,
+                                                            camera_to_test))
+    camera.close()
