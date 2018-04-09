@@ -26,7 +26,7 @@ class Analog_Out:
 
         So far, I've only tested this for the PCI 6733 and the NI 9263.
         """
-        assert daq_type in ('6733', '6733_digital', '9263', '9401')
+        assert daq_type in ('6733', '6733_digital', '9263', '9401', '6001')
         self.daq_type = daq_type
         if self.daq_type == '6733':
             self.max_channels = 8
@@ -44,6 +44,16 @@ class Analog_Out:
             self.max_channels = 8
             self.max_rate = 8e7
             self.channel_type = 'digital'
+        elif self.daq_type == '6001':
+            ## NOTE: This only controls the two AO channels on the
+            ## USB-6001. There are a number of other features of this
+            ## device (AI, DI/O, Counters) that are not exposed by this
+            ## class. It will take more effort and likely a large
+            ## reorganization of this code to expose these
+            ## functionalities.
+            self.max_channels = 2
+            self.max_rate = 5e3
+            self.channel_type = 'analog'
         if num_channels == 'all':
             num_channels = self.max_channels
         assert 1 <= num_channels <= self.max_channels
@@ -88,7 +98,7 @@ class Analog_Out:
         dtype = {'digital': np.uint8, 'analog': np.float64}[self.channel_type]
         self.voltages = np.zeros((2, self.num_channels), dtype=dtype)
         # Play initial voltages with the internal clock
-        self.clock_name = None 
+        self.clock_name = None
         self.set_rate(rate)
         self._write_voltages()
         self.play_voltages(force_final_zeros=False)
@@ -276,25 +286,43 @@ def check(error_code):
             "NI DAQ error code: %i; see above for details."%(error_code))
 
 if __name__ == '__main__':
-    # Test basic functionality of the Analog_Out object
+    ## Test basic functionality of the Analog_Out object
     daq = Analog_Out(
-        rate=1e4,
+        rate=1e3,
         num_channels=2,
-        num_digital_lines=2,
         verbose=True,
-        daq_type='6733',
+        daq_type='6001', # Change this if you want to test another card
         board_name='Dev1')
     try:
         daq.play_voltages()
         v = np.ones((1000, daq.num_channels), dtype=np.float64)
-        d = np.zeros((1000, daq.num_digital_lines), dtype=np.uint8)
         v[:, :] = np.sin(np.linspace(0, np.pi, v.shape[0]
                                      )).reshape(v.shape[0], 1)
-        d[5:, :] = 1
-        daq.play_voltages(v, d)
+        daq.play_voltages(v)
         daq.verbose=False
         for i in range(10):
             daq.play_voltages()
     finally:
         daq.verbose = True
         daq.close()
+
+## This block tests an AO/DO play of 9401/9263 cards in a cDAQ-9174 chassis.
+
+##    ao = ni.Analog_Out(
+##        num_channels='all',
+##        rate=1e3,
+##        daq_type='9263',
+##        board_name='cDAQ1Mod1')
+##    do = ni.Analog_Out(
+##        num_channels='all',
+##            rate=1e3,
+##            daq_type='9401',
+##            board_name='cDAQ1Mod2'
+##            clock_name='/cDAQ1/ao/SampleClock')
+##    digits = np.zeros((1000, do.num_channels), dtype=np.uint8)
+##    digits[10:20, 1]=1
+##
+##    do.play_voltages(digits, block=False) ## will start when AO clock starts
+##    ao.play_voltages(voltages)
+##    ao.close()
+##    do.close()
