@@ -201,7 +201,7 @@ def parse_picoharp_t3_frame(
     # the last clock overflow?) to 'num_pulses' (how many laser pulses
     # have passed since the overflow immediately preceding this frame?):
     overflows = (records == 0xf0000000)
-    num_overflows = np.cumsum(overflows).astype(np.uint64)
+    num_overflows = np.cumsum(overflows, dtype=np.uint64)
     # Now we can clean out overflow records, which can be the majority
     # record for dim samples:
     records = records[~overflows]
