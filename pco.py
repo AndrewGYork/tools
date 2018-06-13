@@ -16,7 +16,7 @@ class Camera:
             dll.open_camera(self.camera_handle, 0)
             assert self.camera_handle.value is not None
         except (WindowsError, AssertionError):
-            print("Failed to open pco.%s camera."%self.camera_type)
+            print("Failed to open pco camera.")
             print(" *Is the camera on, and plugged into the computer?")
             print(" *Is CamWare running? It shouldn't be!")
             print(" *If using a CameraLink camera, is sc2_cl_me4.dll in",
