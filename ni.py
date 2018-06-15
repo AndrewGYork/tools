@@ -32,18 +32,41 @@ class Analog_Out:
             self.max_channels = 8
             self.max_rate = 1e6
             self.channel_type = 'analog'
+            self.has_clock = True
         elif self.daq_type =='6733_digital':
+            # WARNING: Init is weird for 6733 digital lines, because
+            # they don't have their own clock. You probably want to use
+            # the analog clock of the 6733 as the clock for the digital
+            # lines. Since the init method relies on this clock playing,
+            # in order to zero the output voltages, this can get
+            # confusing. Here's a recipe to follow:
+            #
+            # do = Analog_Out(num_channels=8, rate=2e4, daq_type='6733_digital',
+            #     board_name='Dev1', clock_name='/Dev1/ao/SampleClock')
+            #     # This leaves the digital lines stalled, waiting for a clock.
+            # ao = Analog_Out(num_channels=8, rate=2e4, daq_type='6733',
+            #     board_name='Dev1', clock_name=None)
+            #     # This has the side effect of finishing the digital init.
+            #
+            # Then, later, when you want to play digital voltages, you
+            # have to use non-blocking calls and play analog voltages too:
+            #
+            # do.play_voltages(block=False) # Stalls
+            # ao.play_voltages(block=True)  # Plays both types, synchronized
             self.max_channels = 8
             self.max_rate = 1e6
             self.channel_type = 'digital'
+            self.has_clock = False
         elif self.daq_type == '9263':
             self.max_channels = 4
             self.max_rate = 1e5
             self.channel_type = 'analog'
+            self.has_clock = True
         elif self.daq_type == '9401':
             self.max_channels = 8
             self.max_rate = 8e7
             self.channel_type = 'digital'
+            self.has_clock = True
         elif self.daq_type == '6001':
             ## NOTE: This only controls the two AO channels on the
             ## USB-6001. There are a number of other features of this
@@ -54,6 +77,7 @@ class Analog_Out:
             self.max_channels = 2
             self.max_rate = 5e3
             self.channel_type = 'analog'
+            self.has_clock = True
         if num_channels == 'all':
             num_channels = self.max_channels
         assert 1 <= num_channels <= self.max_channels
@@ -62,7 +86,7 @@ class Analog_Out:
             assert isinstance(clock_name, str)
             clock_name = bytes(clock_name, 'ascii')
         self.verbose = verbose
-        
+
         if self.verbose: print("Opening %s-out board..."%self.channel_type)
         self.task_handle = C.c_void_p(0)
         check(api.create_task(bytes(), self.task_handle))
@@ -98,11 +122,17 @@ class Analog_Out:
         dtype = {'digital': np.uint8, 'analog': np.float64}[self.channel_type]
         self.voltages = np.zeros((2, self.num_channels), dtype=dtype)
         # Play initial voltages with the internal clock
-        self.clock_name = None
+        if self.has_clock:
+            self.clock_name = None
+        else:
+            self.clock_name = clock_name
         self.set_rate(rate)
         self._write_voltages()
-        self.play_voltages(force_final_zeros=False)
-        if clock_name is not None: # Switch to external clock
+        if self.has_clock:
+            self.play_voltages(force_final_zeros=False, block=True)
+        else:
+            self.play_voltages(force_final_zeros=False, block=False)
+        if clock_name is not None and self.has_clock: # Switch to external clock
             self.clock_name = clock_name
             self.set_rate(rate)
         return None
@@ -182,12 +212,12 @@ class Analog_Out:
             check(api.stop_task(self.task_handle))
             self._task_running = False
         return None
-    
+
     def _write_voltages(self):
         if not hasattr(self, 'num_points_written'):
             self.num_points_written = C.c_int32(0)
         write = {'analog': api.write_voltages,
-                 'digital': api.write_digits}[self.channel_type]       
+                 'digital': api.write_digits}[self.channel_type]
         check(write(
             self.task_handle,
             self.voltages.shape[0], #Samples per channel
@@ -287,42 +317,46 @@ def check(error_code):
 
 if __name__ == '__main__':
     ## Test basic functionality of the Analog_Out object
-    daq = Analog_Out(
-        rate=1e3,
-        num_channels=2,
-        verbose=True,
-        daq_type='6001', # Change this if you want to test another card
-        board_name='Dev1')
-    try:
-        daq.play_voltages()
-        v = np.ones((1000, daq.num_channels), dtype=np.float64)
-        v[:, :] = np.sin(np.linspace(0, np.pi, v.shape[0]
-                                     )).reshape(v.shape[0], 1)
-        daq.play_voltages(v)
-        daq.verbose=False
-        for i in range(10):
-            daq.play_voltages()
-    finally:
-        daq.verbose = True
-        daq.close()
+    # daq = Analog_Out(
+    #     rate=1e3,
+    #     num_channels=2,
+    #     verbose=True,
+    #     daq_type='6001', # Change this if you want to test another card
+    #     board_name='Dev1')
+    # try:
+    #     daq.play_voltages()
+    #     v = np.ones((1000, daq.num_channels), dtype=np.float64)
+    #     v[:, :] = np.sin(np.linspace(0, np.pi, v.shape[0]
+    #                                  )).reshape(v.shape[0], 1)
+    #     daq.play_voltages(v)
+    #     daq.verbose=False
+    #     for i in range(10):
+    #         daq.play_voltages()
+    # finally:
+    #     daq.verbose = True
+    #     daq.close()
 
 ## This block tests an AO/DO play of 9401/9263 cards in a cDAQ-9174 chassis.
 
-##    ao = ni.Analog_Out(
-##        num_channels='all',
-##        rate=1e3,
-##        daq_type='9263',
-##        board_name='cDAQ1Mod1')
-##    do = ni.Analog_Out(
-##        num_channels='all',
-##            rate=1e3,
-##            daq_type='9401',
-##            board_name='cDAQ1Mod2'
-##            clock_name='/cDAQ1/ao/SampleClock')
-##    digits = np.zeros((1000, do.num_channels), dtype=np.uint8)
-##    digits[10:20, 1]=1
-##
-##    do.play_voltages(digits, block=False) ## will start when AO clock starts
-##    ao.play_voltages(voltages)
-##    ao.close()
-##    do.close()
+
+    rate = 2e4
+    do_type = '6733_digital'
+    do_name = 'Dev1'
+    do_nchannels = 8
+    do_clock = '/Dev1/ao/SampleClock'
+    do = Analog_Out(
+        num_channels=do_nchannels,
+        rate=rate,
+        daq_type=do_type,
+        board_name=do_name,
+        clock_name=do_clock,
+        verbose=False)
+    ao_type = '6733'
+    ao_name = 'Dev1'
+    ao_nchannels = 8
+    ao = Analog_Out(
+        num_channels=ao_nchannels,
+        rate=rate,
+        daq_type=ao_type,
+        board_name=ao_name,
+        verbose=False)
