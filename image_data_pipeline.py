@@ -55,7 +55,7 @@ class Image_Data_Pipeline:
         # Allocate a bunch of 16-bit buffers for image data
         self.buffer_shape = buffer_shape #Buffer shape can change later
         self.buffer_size = int(np.prod(buffer_shape)) #This won't change
-        self.num_data_buffers = num_buffers        
+        self.num_data_buffers = num_buffers
         self.data_buffers = [mp.Array(C.c_uint16, self.buffer_size)
                              for _ in range(self.num_data_buffers)]
         self.idle_data_buffers = list(range(self.num_data_buffers))
@@ -119,7 +119,7 @@ class Image_Data_Pipeline:
         so this is a method of the Image_Data_Pipeline object instead of
         the Data_Pipeline_Camera object.
         """
-        
+
         # First, collect all the permission slips:
         while len(self.idle_data_buffers) < self.num_data_buffers:
             self.collect_permission_slips() #Hopefully non-infinite loop
@@ -181,7 +181,7 @@ class Image_Data_Pipeline:
         self.display.commands.recv()
         self.file_saving.commands.recv()
         return None
-    
+
     def load_permission_slips(
         self,
         num_slips,
@@ -244,7 +244,7 @@ class Image_Data_Pipeline:
             self.idle_data_buffers.append(strip_me['which_buffer'])
             info("Buffer %i idle"%(self.idle_data_buffers[-1]))
         return num_collected
-    
+
     def check_children(self):
         """
         It's good to periodically check if your children have died.
@@ -312,10 +312,8 @@ def dummy_camera_child_process(
     """
     info("Using dummy camera process, not a real camera.")
     buffer_size = np.prod(buffer_shape)
-    fake_data = [np.zeros(buffer_size, dtype=np.uint16)
+    fake_data = [np.random.randint(0, 2**16 - 1, size=buffer_size, dtype=np.uint16)
                  for i in data_buffers]
-    for i, d in enumerate(fake_data):
-        d.fill(int((2**16 - 1) * (i + 1) / len(fake_data)))
     data_idx = -1
     while True:
         # Respond to commands until we've emptied the command pipe.
@@ -703,6 +701,9 @@ class Display:
         # guarantee the pyglet scheduler does this?
         update_interval_seconds = 0.010
         self.pyg.clock.schedule_interval(self.update, update_interval_seconds)
+        self.event_logging = False # TODO: improve this name
+        self.event_log = [] # log for events
+        self.cmd_mode = False # not in cmd mode by default, TODO: improve this name
         return None
 
     def run(self):
@@ -785,33 +786,34 @@ class Display:
         # Click and drag pans the image
         @self.window.event
         def on_mouse_drag(x, y, dx, dy, buttons, modifiers):
-            if buttons == self.pyg.window.mouse.LEFT:
+            if buttons == self.pyg.window.mouse.LEFT and not self.cmd_mode:
                 self.image_x += dx
                 self.image_y += dy
             self._enforce_panning_limits()
         # Mouse wheel zooms the image
         @self.window.event
         def on_mouse_scroll(x, y, scroll_x, scroll_y):
-            old_image_scale = self.image_scale
-            self.image_scale *= 1.3**(scroll_y)
-            # No sense letting the user make the image underfill the window
-            while (self.image.width * self.image_scale < self.window.width and
-                   self.image.height * self.image_scale < self.window.height):
-                self.image_scale = min(
-                    self.window.width / self.image.width,
-                    self.window.height / self.image.height)
-            # Might as well set some sane zoom limits, too.
-            if self.image_scale < 0.01:
-                self.image_scale = 0.01
-            if self.image_scale > 300:
-                self.image_scale = 300
-            # Center the origin of the zoom on the mouse coordinate.
-            # This was kinda thinky to figure out, don't fuck with this
-            # lightly.
-            zoom = self.image_scale / old_image_scale
-            self.image_x = self.image_x * zoom + x * (1 - zoom)
-            self.image_y = self.image_y * zoom + y * (1 - zoom)
-            self._enforce_panning_limits()
+            if not self.cmd_mode:
+                old_image_scale = self.image_scale
+                self.image_scale *= 1.3**(scroll_y)
+                # No sense letting the user make the image underfill the window
+                while (self.image.width * self.image_scale < self.window.width and
+                       self.image.height * self.image_scale < self.window.height):
+                    self.image_scale = min(
+                        self.window.width / self.image.width,
+                        self.window.height / self.image.height)
+                # Might as well set some sane zoom limits, too.
+                if self.image_scale < 0.01:
+                    self.image_scale = 0.01
+                if self.image_scale > 300:
+                    self.image_scale = 300
+                # Center the origin of the zoom on the mouse coordinate.
+                # This was kinda thinky to figure out, don't fuck with this
+                # lightly.
+                zoom = self.image_scale / old_image_scale
+                self.image_x = self.image_x * zoom + x * (1 - zoom)
+                self.image_y = self.image_y * zoom + y * (1 - zoom)
+                self._enforce_panning_limits()
         # If the user double-clicks, reset to default zoom and position.
         # A nice way to reset if you get lost. Of course, detecting
         # double-clicks is not directly possible in pyglet...
@@ -819,15 +821,22 @@ class Display:
         @self.window.event
         def on_mouse_release(x, y, button, modifiers):
             self._last_mouse_release = (x, y, button, clock())
-            
+
         @self.window.event
         def on_mouse_press(x, y, button, modifiers):
-            if hasattr(self, '_last_mouse_release'):
+            if hasattr(self, '_last_mouse_release') and not self.cmd_mode:
                 if (x, y, button) == self._last_mouse_release[:-1]:
                     """Same place, same button"""
                     if clock() - self._last_mouse_release[-1] < 0.2:
                         """We got ourselves a double-click"""
                         self.make_window()
+            if hasattr(self, 'event_logging') and self.cmd_mode:
+                self.event_log.append(
+                    (self.mouse_hover_x,
+                     self.mouse_hover_y,
+                     button,
+                     modifiers) )
+
         # We don't want 'escape' or 'quit' to quit the pyglet
         # application, just withdraw it. The parent application should
         # control when pyglet quits.
@@ -836,6 +845,18 @@ class Display:
             if symbol == self.pyg.window.key.ESCAPE:
                 self.window.set_visible(False)
                 return self.pyg.event.EVENT_HANDLED
+            elif symbol == self.pyg.window.key.LSHIFT and self.event_logging:
+                cursor = self.window.get_system_mouse_cursor(self.window.CURSOR_CROSSHAIR)
+                self.window.set_mouse_cursor(cursor)
+                self.cmd_mode = True
+
+        @self.window.event
+        def on_key_release(symbol, modifiers):
+            if symbol == self.pyg.window.key.LSHIFT and self.event_logging:
+                cursor = self.window.get_system_mouse_cursor(self.window.CURSOR_DEFAULT)
+                self.window.set_mouse_cursor(cursor)
+                self.cmd_mode = False
+
         @self.window.event
         def on_close():
             self.window.set_visible(False)
@@ -877,6 +898,19 @@ class Display:
             self.flip_ud = args.get('flip_ud', self.flip_ud)
             self.commands.send({'flip_lr': self.flip_lr,
                                 'flip_ud': self.flip_ud})
+        elif cmd == 'enable_crosshair':
+            self.event_logging = True
+            self.commands.send(self.event_logging)
+        elif cmd == 'disable_crosshair':
+            self.event_logging = False
+            # if logging is turned off, clear the event list
+            self.event_log = []
+            self.commands.send(self.event_logging)
+        elif cmd == 'get_event_log':
+            # send all the logged events
+            self.commands.send(self.event_log)
+            # reset the event log
+            self.event_log = []
         else:
             info("Command not recognized: " + cmd)
             raise UserWarning('Command not recognized: `%s`' % cmd)
@@ -979,7 +1013,7 @@ class Display:
         return {'type': scaling,
                 'min': self.display_min,
                 'max': self.display_max}
-    
+
     def _make_lookup_table(self):
         """
         Waaaaay faster than how I was doing it before.
@@ -1006,7 +1040,7 @@ class Display:
         disp = plat.get_default_display()
         screen = disp.get_default_screen()
         return screen.width, screen.height
-    
+
     def _enforce_panning_limits(self):
         if self.image_x < (self.window.width -
                            self.image.width*self.image_scale):
@@ -1123,46 +1157,25 @@ def bucket(x, bucket_size):
 if __name__ == '__main__':
     import multiprocessing as mp
     import logging
+    import time
     logger = mp.log_to_stderr()
     logger.setLevel(logging.INFO)
 
     idp = Image_Data_Pipeline(
         num_buffers=5,
-        buffer_shape=(200, 2048, 2060),
-        camera_child_process='pco')
+        buffer_shape=(2, 2048, 2060),
+        camera_child_process='dummy')
     idp.display.withdraw()
     num_slips = 0
+    idp.display.commands.send(('enable_crosshair', {}))
+    assert idp.display.commands.recv() is True
+
     while True:
-##        cmd = input("Ready to take a picture; hit enter...")
-##        if cmd == 'c':
-##            break
         print(idp.check_children())
         idp.load_permission_slips(1, timeout=2)
-        num_slips += 1
-        if num_slips == 1:
-            info("Waiting for camera to catch up...")
-            idp.camera.get_setting('roi')
-            info("Camera caught up")
-            info("Waiting for display to catch up...")
-            while idp.display.get_num_frames_displayed() < 1:
-                sleep(0.4)
-            info("Display caught up")
-            idp.display.set_intensity_scaling('median_filter_autoscale')
-            idp.display.set_intensity_scaling('linear')
-        elif num_slips == 2:
-            idp.apply_camera_settings(
-                region_of_interest=
-                {'left': -1,
-                 'right': 10000},
-                frames_per_buffer=3)
-            input("ROI changed; hit enter...")
-        elif num_slips == 3:
-            idp.apply_camera_settings(
-                region_of_interest=
-                {'left': -1,
-                 'right': 10000,
-                 'top': -1,
-                 'bottom': 10000},
-                frames_per_buffer=10)
-            input("ROI changed; hit enter...")
+        time.sleep(3)
+        idp.display.commands.send(('get_event_log', {}))
+        events = idp.display.commands.recv()
+        for i in events:
+            print(i)
     idp.close()
