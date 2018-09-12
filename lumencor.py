@@ -1,7 +1,20 @@
 import serial
 
 class SpectraX:
-    """Controls Lumencor SpectraX through a serial port."""
+    """Controls Lumencor SpectraX through a serial port.
+    
+    TTL commands on the SpectraX serve the function of the 'set_state' serial
+    command. For our SpectraX units, 5V is True and 0V is False.
+    We specifically requested "active high" (5V: ON) configurations, but the
+    default is active low (0V: ON) and this behavior may be seen on other units.    
+    
+    LEDs respond to TTL voltages in real time, rather than to impulses.
+    If an LED state is set to True by serial, the TTL has no effect.
+
+    To use TTL control:
+    1. Set all LED states to False
+    2. Set the desired intensities by serial command.
+    """
     
     def __init__(self, which_port, verbose=True):
         """Constructor for SpectraX class.
