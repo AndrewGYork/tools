@@ -8,7 +8,7 @@ class SpectraX:
     We specifically requested "active high" (5V: ON) configurations, but the
     default is active low (0V: ON) and this behavior may be seen on other units.    
     
-    LEDs respond to TTL voltages in real time, rather than to impulses.
+    LEDs respond to TTL voltages in real time, rather than to rising edges.
     If an LED state is set to True by serial, the TTL has no effect.
 
     To use TTL control:
