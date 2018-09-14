@@ -27,7 +27,7 @@ class Camera:
         dll.reset_settings_to_default(self.camera_handle)
         self.disarm()
         self._refresh_camera_setting_attributes()
-        return None                            
+        return None
 
     def close(self):
         self.disarm()
@@ -53,21 +53,27 @@ class Camera:
         * 'region_of_interest' will be adjusted to match the nearest
           legal ROI that the camera supports. See _legalize_roi() for
           details.
-        """    
+        """
         if self.armed: self.disarm()
         if self.verbose: print("Applying settings to camera...")
         """
         These settings matter, but we don't expose their functionality
         through apply_settings():
         """
-        dll.reset_settings_to_default(self.camera_handle)        
+        dll.reset_settings_to_default(self.camera_handle)
         self._set_sensor_format('standard')
         self._set_acquire_mode('auto')
-        self._set_pixel_rate({'edge 4.2': 272250000,
-                              'edge 5.5': 286000000,
-                              'pixelfly':  24000000, # Read from camera once
-                              'panda 4.2': 0, # TODO: This can't be right(?)
-                              }[self.camera_type])
+        try:
+            self._set_pixel_rate({'edge 4.2': 272250000,
+                                  'edge 5.5': 286000000,
+                                  'pixelfly':  24000000, # Read from camera once
+                                  'panda 4.2': 44000000, # Read from camera once
+                                  }[self.camera_type])
+        except WindowsError:
+            # TODO we can remove when we don't have any pandas with older firmware
+            self._set_pixel_rate(0)
+            print('WARNING! Setting pixel rate to zero (for older versions of '
+                  ' panda firmware)')
         """
         I think these settings don't matter for the pco.edge, but just
         in case...
@@ -88,7 +94,9 @@ class Camera:
         camera_health = self._get_camera_health()
         for k, v in camera_health.items():
             if k == 'status' and self.camera_type == 'panda 4.2':
-                assert v == 16
+                # TODO remove tolerance  of status 16. This is only for older
+                # firmware versions of the panda.
+                assert v == 0 or v == 16, 'Status code %d' % v
             else:
                 assert v == 0
         return None
@@ -100,7 +108,7 @@ class Camera:
                 print('Arm requested, but the pco camera'
                       'is already armed. Disarming...')
             self.disarm()
-        if self.verbose: print("Arming camera...") 
+        if self.verbose: print("Arming camera...")
         dll.arm_camera(self.camera_handle)
         wXRes, wYRes, wXResMax, wYResMax = (
             C.c_uint16(), C.c_uint16(), C.c_uint16(), C.c_uint16())
@@ -156,7 +164,7 @@ class Camera:
         if not hasattr(self, 'armed'):
             self.armed = False
         if not self.armed:
-            if self.camera_type == 'pixelfly': 
+            if self.camera_type == 'pixelfly':
                 return None # pixelfly throws an error if disarmed twice
         if self.verbose: print("Disarming camera...")
         dll.set_recording_state(self.camera_handle, 0)
@@ -254,9 +262,9 @@ class Camera:
                         if elapsed_time < first_trigger_timeout_seconds:
                             continue
                     raise TimeoutError(
-                        "After %i polls,"%(self.num_polls) + 
-                        " %i sleeps"%(self.num_sleeps) + 
-                        " and %0.3f seconds,"%(elapsed_time) + 
+                        "After %i polls,"%(self.num_polls) +
+                        " %i sleeps"%(self.num_sleeps) +
+                        " and %0.3f seconds,"%(elapsed_time) +
                         " no buffer. (%i acquired)"%(num_acquired),
                         num_acquired=num_acquired)
             try:
@@ -300,9 +308,9 @@ class Camera:
     def _refresh_camera_setting_attributes(self):
         """
         There are two ways to access a camera setting:
-        
+
          1. Ask the camera directly, using a self.get_*() - type method.
-        
+
           This interrogates the camera via a DLL call, updates the
           relevant attribute(s) of the Edge object, and returns the
           relevant value(s). This is slower, because you have to wait for
@@ -349,7 +357,7 @@ class Camera:
         dll.set_sensor_format(self.camera_handle, mode_numbers[mode])
         assert self._get_sensor_format() == mode
         return self.sensor_format
-    
+
     def _get_camera_health(self):
         dwWarn, dwErr, dwStatus = (
             C.c_uint32(), C.c_uint32(), C.c_uint32())
@@ -420,12 +428,12 @@ class Camera:
             print(" Trigger mode:", trigger_mode_names[wTriggerMode.value])
         self.trigger_mode = trigger_mode_names[wTriggerMode.value]
         return self.trigger_mode
-    
+
     def _set_trigger_mode(self, mode="auto_trigger"):
         trigger_mode_numbers = {
             "auto_trigger": 0,
             "software_trigger": 1,
-            "external_trigger": 2} 
+            "external_trigger": 2}
         if self.verbose: print(" Setting trigger mode to:", mode)
         dll.set_trigger_mode(self.camera_handle, trigger_mode_numbers[mode])
         assert self._get_trigger_mode() == mode
@@ -500,8 +508,12 @@ class Camera:
     def _get_pixel_rate(self):
         dwPixelRate = C.c_uint32(0)
         dll.get_pixel_rate(self.camera_handle, dwPixelRate)
+        ## TODO: Checking of the reported pixel rate could be greatly improved.
         if self.camera_type == 'panda 4.2':
-            assert dwPixelRate.value == 0 ## TODO: This can't be right(?)
+            # TODO: Older versions of the panda firmware report the  pixel rate
+            # as zero. This can be removed once we dont have any cameras with
+            # the older firmware.
+            assert dwPixelRate.value != 0 or dwPixelRate.value == 0
         else:
             assert dwPixelRate.value != 0
         if self.very_verbose: print(" Pixel rate:", dwPixelRate.value)
@@ -587,7 +599,7 @@ class Camera:
             max_lines = 1024
             full_chip_rolling_time = 2.5e4 # TODO: verify rolling time for panda
         # TODO: calculate rolling time for pixelfly...better
-        elif self.camera_type == 'pixelfly': 
+        elif self.camera_type == 'pixelfly':
             full_chip_rolling_time = 7.5e4
             self.rolling_time_microseconds = full_chip_rolling_time
             return self.roi
@@ -602,14 +614,14 @@ class Camera:
         Note that this method fills in some of the arguments for you.
         """
         return legalize_roi(roi, self.camera_type, self.roi, self.verbose)
-    
+
     def _set_roi(self, region_of_interest):
         roi = self._legalize_roi(region_of_interest)
         dll.set_roi(self.camera_handle,
                     roi['left'], roi['top'], roi['right'], roi['bottom'])
         assert self._get_roi() == roi
         return self.roi
-    
+
     def _get_camera_type(self):
         camera_name = C.c_char_p(b' '*40)
         dll.get_camera_name(self.camera_handle, camera_name, 40)
@@ -620,7 +632,7 @@ class Camera:
         try:
             self.camera_type = name2type[camera_name.value.decode('ascii')]
         except KeyError:
-            raise UserWarning('Unexpected camera type - %s' % camera_name.value)       
+            raise UserWarning('Unexpected camera type - %s' % camera_name.value)
         return self.camera_type
 
 def legalize_roi(
@@ -655,9 +667,10 @@ def legalize_roi(
         min_width, min_height = 1392, 1040
         max_lr, max_ud, step_lr = 1392, 1040, 1392
     elif camera_type == 'panda 4.2':
-        ## TODO: 152 should probably change to 16 after a firmware update
-        min_width, min_height = 152, 10
-        max_lr, max_ud, step_lr = 2048, 2048, 8
+        # TODO min_width can be set to 32 when we upgrade the firmware on
+        # old pandas.
+        min_width, min_height = 192, 10
+        max_lr, max_ud, step_lr = 2048, 2048, 32
     if current_roi is None:
         current_roi = {'left': min_lr, 'right':  max_lr,
                        'top':  min_ud, 'bottom': max_ud}
@@ -1052,7 +1065,7 @@ if __name__ == '__main__':
             'left': np.random.randint(low=-2000, high=3000),
             'right': np.random.randint(low=-2000, high=3000)}
         #Delete some keys/vals
-        roi = {k: v for k, v in roi.items() if v > -10} 
+        roi = {k: v for k, v in roi.items() if v > -10}
         camera.apply_settings(exposure_time_microseconds=exposure,
                               region_of_interest=roi)
         num_buffers = np.random.randint(1, 16)
@@ -1070,7 +1083,7 @@ if __name__ == '__main__':
         start = time.perf_counter()
         camera.record_to_memory(num_images=images.shape[0], out=images,
                                 first_trigger_timeout_seconds=5)
-        print("Elapsed time:", time.perf_counter() - start)            
+        print("Elapsed time:", time.perf_counter() - start)
         print(images.min(axis=(1, 2)), images.max(axis=(1, 2)),
               images.shape)
         if not 0 < images.min() < images.max():
