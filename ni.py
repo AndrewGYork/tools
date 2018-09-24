@@ -225,6 +225,18 @@ class Analog_Out:
         seconds = num_pixels / self.rate
         return seconds
 
+    def s2s(self, seconds):
+        '''Calculate nearest duration the AO card can exactly deliver.
+
+        This function rounds a time (in seconds) to the nearest time
+        that the AO card can exactly deliver via an integer number of
+        "pixels". For example, maybe you'd like to play a 10 millisecond
+        pulse of voltage, but the AO rate is set to 300; how many
+        "pixels" should we expect the AO card play for?
+        '''
+        seconds = self.p2s(s2p(seconds))
+        return seconds
+
     def _ensure_task_is_stopped(self):
         if not hasattr(self, '_task_running'):
             self._task_running = False
