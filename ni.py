@@ -202,6 +202,29 @@ class Analog_Out:
         if self.verbose: print(" %s board is closed."%self.daq_type)
         return None
 
+    def s2p(self, seconds):
+        '''Convert a duration in seconds to a number of AO "pixels."
+
+        Frequently I know how many seconds I want to play a voltage for,
+        and I do simple math to convert this to how many "pixels" of
+        voltage I should use on the analog out card to get this many
+        seconds. Frequently I get this math wrong. That's why I wrote
+        this function.
+        ''' 
+        num_pixels = int(round(self.rate * seconds))
+        return num_pixels
+        
+    def p2s(self, num_pixels):
+        '''Convert a  number of AO "pixels to a duration in seconds."
+
+        Frequently I know how many "pixels" of voltage I'm playing on
+        the analog out card, and I do simple math to convert this to how
+        many seconds I'm playing that voltage for. Frequently I get this
+        math wrong. That's why I wrote this function.
+        ''' 
+        seconds = num_pixels / self.rate
+        return seconds
+
     def _ensure_task_is_stopped(self):
         if not hasattr(self, '_task_running'):
             self._task_running = False
