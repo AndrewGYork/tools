@@ -234,7 +234,7 @@ class Analog_Out:
         pulse of voltage, but the AO rate is set to 300; how many
         "pixels" should we expect the AO card play for?
         '''
-        seconds = self.p2s(s2p(seconds))
+        seconds = self.p2s(self.s2p(seconds))
         return seconds
 
     def _ensure_task_is_stopped(self):
