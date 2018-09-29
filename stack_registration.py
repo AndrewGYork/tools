@@ -549,13 +549,26 @@ def coinflip_split(a, photoelectrons_per_count):
     return out_1, photoelectrons - out_1
 
 def _smooth_rfft2(x):
-    """TODO: write this docstring
+    """Return the rfft of an extremely smooth array with the same edge
+    discontinuities as 'x'.
 
-FFT-based registrations suffers from...
-Periodic Plus Smooth Image Decomposition
-Moisan, L. J Math Imaging Vis (2011) 39: 161.
-doi.org/10.1007/s10851-010-0227-1
-https://github.com/jacobkimmel/ps_decomp
+    FFT-based registrations suffers from a "cross" artifact. Previous
+    versions of Mr. Stacky used real-space windowing to fight this
+    artifact, but this probably biases you towards smaller shifts, and
+    causes secondary problems with high-background images, which we
+    semi-solved with background subtraction. A fragile, lame situation.
+
+    Then we found this paper!
+    Periodic Plus Smooth Image Decomposition
+    Moisan, L. J Math Imaging Vis (2011) 39: 161.
+    doi.org/10.1007/s10851-010-0227-1
+    ...and Jacob Kimmel implemented a python version:
+    https://github.com/jacobkimmel/ps_decomp
+
+    Go read the paper or the github repo if you want the details, but
+    long story short, this is the right way to dodge the cross artifact,
+    and lets us remove a lot of masking/background-subtracting code. Mr.
+    Stacky is one step closer to what it should be.
     """
     assert len(x.shape) == 2
     v = np.zeros_like(x)
