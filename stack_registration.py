@@ -1,10 +1,11 @@
 import numpy as np
 try:
-    from scipy.optimize import minimize
+    from scipy.ndimage.filters import median_filter
     from scipy.ndimage import map_coordinates
     from scipy.ndimage.interpolation import rotate
-except:
-    minimize = None #Won't be able to use 'phase_fitting' in stack_registration
+except ImportError:
+    def median_filter(x, size): # No scipy; use my half-assed median filter
+        return _lousy_1d_median_filter(x, size)
     map_coordinates = None # Won't be able to use stack_rotational_registration
     rotate = None
 try:
@@ -18,7 +19,6 @@ def stack_registration(
     refinement='spike_interpolation',
     register_in_place=True,
     fourier_cutoff_radius=None,
-    background_subtraction=None,
     debug=False,):
     """Calculate shifts which would register the slices of a
     three-dimensional stack `s`, and optionally register the stack in-place.
@@ -26,16 +26,14 @@ def stack_registration(
     Axis 0 is the "z-axis", axis 1 is the "up-down" (Y) axis, and axis 2
     is the "left-right" (X) axis. For each XY slice, we calculate the
     shift in the XY plane which would line that slice up with the slice
-    specified by `align_to_this_slice`. If `align_to_this_slice` is a
-    number, it indicates which slice of `s` to use as the reference
+    specified by `align_to_this_slice`. If `align_to_this_slice` is an
+    integer, it indicates which slice of `s` to use as the reference
     slice. If `align_to_this_slice` is a numpy array, it is used as the
     reference slice, and must be the same shape as a 2D slice of `s`.
 
-    `refinement` is one of `integer`, `spike_interpolation`, or
-    `phase_fitting`, in order of increasing precision/slowness. I don't
-    yet have any evidence that my implementation of phase fitting gives
-    any improvement over (faster, simpler) spike interpolation, so
-    caveat emptor.
+    `refinement` is one of `integer`, (fast registration to the nearest
+    pixel) or `spike_interpolation` (slower but hopefully more accurate
+    sub-pixel registration).
 
     `register_in_place`: If `True`, modify the input stack `s` by
     shifting its slices to line up with the reference slice.
@@ -45,57 +43,41 @@ def stack_registration(
     due to aliasing and noise anyway. If `None`, attempt to estimate a
     resonable cutoff.
 
-    'background_subtraction': One of None, 'mean', 'min', or
-    'edge_mean'. Image registration is sensitive to edge effects. To
-    combat this, we multiply the image by a real-space mask which goes
-    to zero at the edges. For dim images on large DC backgrounds, the
-    registration can end up mistaking this mask for an important image
-    feature, distorting the registration. Sometimes it's helpful to
-    subtract a background from the image before registration, to reduce
-    this effect. 'mean' and 'min' subtract the mean and minimum of the
-    stack 's', respectively, and 'edge_mean' subtracts the mean of the
-    edge pixels. Use None (the default) for no background subtraction.
+    `debug`: (Attempt to) output several TIF files that are often useful
+    when stack_registration isn't working. This needs to import
+    np_tif.py; you can get a copy of np_tif.py from
+    https://github.com/AndrewGYork/tools/blob/master/np_tif.py
+    Probably the best way to understand what these files are, and how to
+    interpret them, is to read the code of the rest of this function.
     """
     assert len(s.shape) == 3
     try:
         assert align_to_this_slice in range(s.shape[0])
+        skip_aligning_this_slice = align_to_this_slice
         align_to_this_slice = s[align_to_this_slice, :, :]
     except ValueError:
+        skip_aligning_this_slice = None
         align_to_this_slice = np.squeeze(align_to_this_slice)
     assert align_to_this_slice.shape == s.shape[-2:]
-    assert refinement in ('integer', 'spike_interpolation', 'phase_fitting')
-    if refinement == 'phase_fitting' and minimize is None:
-        raise UserWarning("Failed to import scipy minimize; no phase fitting.")
+    assert refinement in ('integer', 'spike_interpolation')
     assert register_in_place in (True, False)
-    # What background should we subtract from each slice of the stack?
-    assert background_subtraction in (None, 'mean', 'min', 'edge_mean')
-    if background_subtraction is None:
-        bg = 0
-    elif background_subtraction is 'min':
-        bg = s.min()
-    elif background_subtraction is 'mean':
-        bg = s.mean()
-    elif background_subtraction is 'edge_mean':
-        bg = np.mean((s[:, 0, :].mean(), s[:, -1, :].mean(),
-                      s[:, :, 0].mean(), s[:, :, -1].mean()))
-    if fourier_cutoff_radius is None:
-        fourier_cutoff_radius = estimate_fourier_cutoff_radius(s, bg, debug)
-    assert (0 < fourier_cutoff_radius <= 0.5)
+    if fourier_cutoff_radius is not None:
+        assert (0 < fourier_cutoff_radius <= 0.5)
     assert debug in (True, False)
     if debug and np_tif is None:
         raise UserWarning("Failed to import np_tif; no debug mode.")
-    ## Multiply each slice of the stack by an XY mask that goes to zero
-    ## at the edges, to prevent periodic boundary artifacts when we
-    ## Fourier transform.
-    mask_ud = np.sin(np.linspace(0, np.pi, s.shape[1])).reshape(s.shape[1], 1)
-    mask_lr = np.sin(np.linspace(0, np.pi, s.shape[2])).reshape(1, s.shape[2])
-    masked_reference_slice = (align_to_this_slice - bg) * mask_ud * mask_lr
     ## We'll base our registration on the phase of the low spatial
     ## frequencies of the cross-power spectrum. We'll need the complex
-    ## conjugate of the Fourier transform of the masked reference slice,
-    ## and a mask in the Fourier domain to pick out the low spatial
-    ## frequencies:
-    ref_slice_ft_conj = np.conj(np.fft.rfftn(masked_reference_slice))
+    ## conjugate of the Fourier transform of the periodic version of the
+    ## reference slice, and a mask in the Fourier domain to pick out the
+    ## low spatial frequencies:
+    ref_slice_rfft = np.fft.rfftn(align_to_this_slice)
+    if fourier_cutoff_radius is None: # Attempt to estimate a sensible FT radius
+        fourier_cutoff_radius = estimate_fourier_cutoff_radius(
+            ref_slice_rfft, debug=debug, input_is_rfftd=True, shape=s.shape[1:])
+    ref_slice_ft_conj = np.conj(ref_slice_rfft -
+                                _smooth_rfft2(align_to_this_slice))
+    del ref_slice_rfft
     k_ud = np.fft.fftfreq(s.shape[1]).reshape(ref_slice_ft_conj.shape[0], 1)
     k_lr = np.fft.rfftfreq(s.shape[2]).reshape(1, ref_slice_ft_conj.shape[1])
     fourier_mask = (k_ud**2 + k_lr**2) < (fourier_cutoff_radius)**2
@@ -105,28 +87,35 @@ def stack_registration(
     registration_shifts = []
     if debug:
         ## Save some intermediate data to help with debugging
-        masked_stack = np.zeros_like(s)
-        masked_stack_ft = np.zeros(
+        stack_ft = np.zeros(
             (s.shape[0],) + ref_slice_ft_conj.shape, dtype=np.complex128)
-        masked_stack_ft_vs_ref = np.zeros_like(masked_stack_ft)
-        cross_power_spectra = np.zeros_like(masked_stack_ft)
+        periodic_stack = np.zeros_like(s)
+        periodic_stack_ft = np.zeros(
+            (s.shape[0],) + ref_slice_ft_conj.shape, dtype=np.complex128)
+        periodic_stack_ft_vs_ref = np.zeros_like(periodic_stack_ft)
+        cross_power_spectra = np.zeros_like(periodic_stack_ft)
         spikes = np.zeros(s.shape, dtype=np.float64)
     for which_slice in range(s.shape[0]):
+        if which_slice == skip_aligning_this_slice and not debug:
+            registration_shifts.append(np.zeros(2))
+            continue
         if debug: print("Calculating registration for slice", which_slice)
-        ## Compute the cross-power spectrum of our slice, and mask out
-        ## the high spatial frequencies.
-        current_slice = (s[which_slice, :, :] - bg) * mask_ud * mask_lr
-        current_slice_ft = np.fft.rfftn(current_slice)
-        cross_power_spectrum = current_slice_ft * ref_slice_ft_conj
+        ## Compute the cross-power spectrum of the periodic component of
+        ## our slice with the periodic component of the reference slice,
+        ## and mask out the high spatial frequencies.
+        current_slice_ft = np.fft.rfftn(s[which_slice, :, :])
+        current_slice_ft_periodic = (current_slice_ft -
+                                     _smooth_rfft2(s[which_slice, :, :]))
+        cross_power_spectrum = current_slice_ft_periodic * ref_slice_ft_conj
         cross_power_spectrum = (fourier_mask *
                                 cross_power_spectrum /
                                 np.abs(cross_power_spectrum))
         ## Inverse transform to get a 'spike' in real space. The
         ## location of this spike gives the desired registration shift.
         ## Start by locating the spike to the nearest integer:
-        spike = np.fft.irfftn(cross_power_spectrum, s=current_slice.shape)
+        spike = np.fft.irfftn(cross_power_spectrum, s=s.shape[1:])
         loc = np.array(np.unravel_index(np.argmax(spike), spike.shape))
-        if refinement in ('spike_interpolation', 'phase_fitting'):
+        if refinement == 'spike_interpolation':
             ## Use (very simple) three-point polynomial interpolation to
             ## refine the location of the peak of the spike:
             neighbors = np.array([-1, 0, 1])
@@ -140,54 +129,49 @@ def stack_registration(
         ## Convert our shift into a signed number near zero:
         loc = ((np.array(spike.shape)//2 + loc) % np.array(spike.shape)
                -np.array(spike.shape)//2)
-        if refinement == 'phase_fitting':
-            if debug: print("Phase fitting slice", which_slice, "...")
-            ## (Attempt to) further refine our registration shift by
-            ## fitting Fourier phases. I'm not sure this does any good,
-            ## perhaps my implementation is lousy?
-            def minimize_me(loc, cross_power_spectrum):
-                disagreement = np.abs(
-                    expected_cross_power_spectrum(loc, k_ud, k_lr) -
-                    cross_power_spectrum
-                    )[fourier_mask].sum()
-                if debug: print(" Shift:", loc, "Disagreement:", disagreement)
-                return disagreement
-            loc = minimize(minimize_me,
-                           x0=loc,
-                           args=(cross_power_spectrum,),
-                           method='Nelder-Mead').x
         registration_shifts.append(loc)
+        if register_in_place:
+            ## Modify the input stack in-place so it's registered.
+            apply_registration_shifts(
+                s[which_slice:which_slice+1, :, :],
+                [loc],
+                registration_type=('nearest_integer'
+                                   if refinement == 'integer'
+                                   else 'fourier_interpolation'),
+                s_rfft=np.expand_dims(current_slice_ft, axis=0))
         if debug:
             ## Save some intermediate data to help with debugging
-            masked_stack[which_slice, :, :] = current_slice
-            masked_stack_ft[which_slice, :, :] = (
+            stack_ft[which_slice, :, :] = (
                 np.fft.fftshift(current_slice_ft, axes=0))
-            masked_stack_ft_vs_ref[which_slice, :, :] = (
-                np.fft.fftshift(current_slice_ft * ref_slice_ft_conj, axes=0))
+            periodic_stack[which_slice, :, :] = np.fft.irfftn(
+                current_slice_ft_periodic, s=s.shape[1:]).real
+            periodic_stack_ft[which_slice, :, :] = (
+                np.fft.fftshift(current_slice_ft_periodic, axes=0))
+            periodic_stack_ft_vs_ref[which_slice, :, :] = (
+                np.fft.fftshift(current_slice_ft_periodic * ref_slice_ft_conj,
+                                axes=0))
             cross_power_spectra[which_slice, :, :] = (
                 np.fft.fftshift(cross_power_spectrum, axes=0))
             spikes[which_slice, :, :] = np.fft.fftshift(spike)
-    if register_in_place:
-        ## Modify the input stack in-place so it's registered.
-        if refinement == 'integer':
-            registration_type = 'nearest_integer'
-        else:
-            registration_type = 'fourier_interpolation'
-        apply_registration_shifts(
-            s, registration_shifts, registration_type=registration_type)
     if debug:
-        np_tif.array_to_tif(masked_stack, 'DEBUG_masked_stack.tif')
-        np_tif.array_to_tif(np.log(np.abs(masked_stack_ft)),
-                            'DEBUG_masked_stack_FT_log_magnitudes.tif')
-        np_tif.array_to_tif(np.angle(masked_stack_ft),
-                            'DEBUG_masked_stack_FT_phases.tif')
-        np_tif.array_to_tif(np.angle(masked_stack_ft_vs_ref),
-                            'DEBUG_masked_stack_FT_phase_vs_ref.tif')
+        np_tif.array_to_tif(periodic_stack,
+                            'DEBUG_1_periodic_stack.tif')
+        np_tif.array_to_tif(np.log(1 + np.abs(stack_ft)),
+                            'DEBUG_2_stack_FT_log_magnitudes.tif')
+        np_tif.array_to_tif(np.angle(stack_ft),
+                            'DEBUG_3_stack_FT_phases.tif')
+        np_tif.array_to_tif(np.log(1 + np.abs(periodic_stack_ft)),
+                            'DEBUG_4_periodic_stack_FT_log_magnitudes.tif')
+        np_tif.array_to_tif(np.angle(periodic_stack_ft),
+                            'DEBUG_5_periodic_stack_FT_phases.tif')
+        np_tif.array_to_tif(np.angle(periodic_stack_ft_vs_ref),
+                            'DEBUG_6_periodic_stack_FT_phase_vs_ref.tif')
         np_tif.array_to_tif(np.angle(cross_power_spectra),
-                            'DEBUG_cross_power_spectral_phases.tif')
-        np_tif.array_to_tif(spikes, 'DEBUG_spikes.tif')
+                            'DEBUG_7_cross_power_spectral_phases.tif')
+        np_tif.array_to_tif(spikes,
+                            'DEBUG_8_spikes.tif')
         if register_in_place:
-            np_tif.array_to_tif(s, 'DEBUG_registered_stack.tif')
+            np_tif.array_to_tif(s, 'DEBUG_9_registered_stack.tif')
     return np.array(registration_shifts)
 
 mr_stacky = stack_registration #I like calling it this.
@@ -197,6 +181,7 @@ def apply_registration_shifts(
     registration_shifts,
     registration_type='fourier_interpolation',
     edges='zero',
+    s_rfft=None,
     ):
     """Modify the input stack `s` in-place so it's registered.
 
@@ -209,6 +194,10 @@ def apply_registration_shifts(
     assert len(registration_shifts) == s.shape[0]
     assert registration_type in ('fourier_interpolation', 'nearest_integer')
     assert edges in ('sloppy', 'zero')
+    if s_rfft is not None:
+        assert s_rfft.shape[:2] == s.shape[:2]
+        assert s_rfft.shape[2] == np.floor(s.shape[2]/2) + 1
+        assert s_rfft.dtype == np.complex128 # Maybe generalize this someday?
     n_y, n_x = s.shape[-2:]
     k_ud, k_lr = np.fft.fftfreq(n_y), np.fft.rfftfreq(n_x)
     k_ud, k_lr = k_ud.reshape(k_ud.size, 1), k_lr.reshape(1, k_lr.size)
@@ -221,9 +210,12 @@ def apply_registration_shifts(
                 s[which_slice, top-y:bot-y, lef-x:rig-x])
         elif registration_type == 'fourier_interpolation':
             phase_correction = expected_cross_power_spectrum(loc, k_ud, k_lr)
-            shift_me = s[which_slice, :, :].astype(np.float64, copy=False)
+            if s_rfft is None:
+                shift_me_rfft = np.fft.rfftn(s[which_slice, :, :])
+            else:
+                shift_me_rfft = s_rfft[which_slice, :, :]
             s[which_slice, :, :] = np.fft.irfftn(
-                np.fft.rfftn(shift_me) / phase_correction, s=(n_y, n_x)).real
+                shift_me_rfft / phase_correction, s=(n_y, n_x)).real
         if edges == 'sloppy':
             pass
         elif edges == 'zero':
@@ -272,6 +264,7 @@ def stack_rotational_registration(
     with the reference slice. What would you like to happen when this
     warning triggers?
     """
+    # TODO: take advantage of periodic/smooth decomposition
     assert len(s.shape) == 3
     try:
         assert align_to_this_slice in range(s.shape[0])
@@ -466,7 +459,8 @@ def expected_cross_power_spectrum(shift, k_ud, k_lr):
     shift_ud, shift_lr = shift
     return np.exp(-2j*np.pi*(k_ud*shift_ud + k_lr*shift_lr))
 
-def estimate_fourier_cutoff_radius(s, bg=0, debug=False):
+def estimate_fourier_cutoff_radius(
+    s, debug=False, input_is_rfftd=False, shape=None):
     """Estimate the radius in the Fourier domain which divides signal
     from pure noise.
 
@@ -475,33 +469,45 @@ def estimate_fourier_cutoff_radius(s, bg=0, debug=False):
     function tries to estimate the position of this edge. The estimation
     is not especially precise, but seems to be within the tolerance of
     `stack_registration`.
+
+    'input_is_rfftd': a Boolean indicating whether or not the input has
+    already been processed with a 2D real-input Fourier transform
+    (rfft). If so, great! This saves us some computation. If not, we'll
+    do it ourselves. We need to know the shape of the input BEFORE this
+    rfft, so if you use this option, you also have to provide 'shape'.
     """
     # We only need one slice for this estimate:
     if len(s.shape) == 3: s = s[0, :, :]
     assert len(s.shape) == 2
-    s = s - bg # Background subtraction
-    # Mask `s` to avoid fourier-domain artifacts:
-    mask_ud = np.sin(np.linspace(0, np.pi, s.shape[0])).reshape(s.shape[0], 1)
-    mask_lr = np.sin(np.linspace(0, np.pi, s.shape[1])).reshape(1, s.shape[1])
-    s = s * mask_ud * mask_lr
+    if input_is_rfftd:
+        assert len(shape) == 2
+        assert shape[-2] == s.shape[-2]
+    else:
+        shape = s.shape
     # We use pixels in the 'corners' of the Fourier domain to estimate
     # our noise floor:
-    k_ud, k_lr = np.fft.fftfreq(s.shape[-2]), np.fft.rfftfreq(s.shape[-1])
+    k_ud, k_lr = np.fft.fftfreq(shape[-2]), np.fft.rfftfreq(shape[-1])
     k_ud, k_lr = k_ud.reshape(k_ud.size, 1), k_lr.reshape(1, k_lr.size)
-    ft_radius = np.sqrt(k_ud**2 + k_lr**2)
-    deplorables = ft_radius > 0.5
-    ft_mag = np.abs(np.fft.rfftn(s))
+    ft_radius_squared = k_ud**2 + k_lr**2
+    deplorables = ft_radius_squared > 0.25
+    if input_is_rfftd: # Save us a Fourier transform
+        ft_mag = np.abs(s)
+    else:
+        ft_mag = np.abs(np.fft.rfftn(s))
     noise_floor = np.median(ft_mag[deplorables])
-    # We use the brightest pixels in the Fourier domain (except the DC
-    # term) to estimate the peak signal:
-    ft_mag[0, 0] = 0
-    peak_signal = ft_mag.max()
-    # Our cutoff radius is the highest spatial frequency with an
-    # amplitude that exceeds the geometric mean of the noise floor and
-    # the peak signal:
-    cutoff_signal = np.sqrt(noise_floor * peak_signal)
-    cutoff_radius = ft_radius[(ft_mag > cutoff_signal) &
-                              (ft_radius < 0.45)].max()
+    # We use the brightest pixel along a 45 degree cut in the Fourier
+    # domain (except the DC term) to estimate the peak signal:
+    diagonal_line = ft_mag[np.arange(1, min(ft_mag.shape)),
+                           np.arange(1, min(ft_mag.shape))]
+    peak_signal = diagonal_line.max()
+    # Our cutoff radius is the highest spatial frequency along a
+    # median-filtered version of this diagonal cut line with an
+    # amplitude that exceeds the weighted geometric mean of the noise
+    # floor and the peak signal:
+    cutoff_signal = noise_floor**(2/3) * peak_signal**(1/3)
+    filtered_line = median_filter(diagonal_line, size=10)
+    cutoff_pixel = np.argmax(filtered_line < cutoff_signal)
+    cutoff_radius = np.sqrt(ft_radius_squared[cutoff_pixel, cutoff_pixel])
     if debug: print("Estimated Fourier cutoff radius:", cutoff_radius)
     return cutoff_radius
 
@@ -542,12 +548,54 @@ def coinflip_split(a, photoelectrons_per_count):
     out_1 = np.random.binomial(photoelectrons, 0.5)
     return out_1, photoelectrons - out_1
 
+def _smooth_rfft2(x):
+    """TODO: write this docstring
+
+FFT-based registrations suffers from...
+Periodic Plus Smooth Image Decomposition
+Moisan, L. J Math Imaging Vis (2011) 39: 161.
+doi.org/10.1007/s10851-010-0227-1
+https://github.com/jacobkimmel/ps_decomp
+    """
+    assert len(x.shape) == 2
+    v = np.zeros_like(x)
+    v[0,  :] += x[-1, :] - x[0,  :]
+    v[:,  0] += x[:, -1] - x[:,  0]
+    v[-1, :] += -v[0, :]
+    v[:, -1] += -v[:, 0]
+    v_rfft = np.fft.rfft2(v)
+    q = np.arange(v_rfft.shape[0]).reshape(v_rfft.shape[0], 1)
+    r = np.arange(v_rfft.shape[1]).reshape(1, v_rfft.shape[1])
+    denominator = (2*np.cos(q * (2*np.pi / x.shape[0])) + 
+                   2*np.cos(r * (2*np.pi / x.shape[1])) - 4)
+    denominator[0, 0] = 1 # Hack to avoid divide-by-zero
+    smooth_rfft = v_rfft / denominator
+    smooth_rfft[0, 0] = 0 # Smooth component has no DC term
+    return smooth_rfft
+
+def _lousy_1d_median_filter(x, size):
+    """A backup function in case we don't have scipy.
+
+    The function 'estimate_fourier_cutoff_radius' uses a scipy median
+    filter. It would be great if we can still get by without scipy, even
+    if the performance suffers.
+    """
+    # Let's set our ambitions *really* low:
+    assert len(x.shape) == 1
+    assert size in range(2, 20)
+    median_filtered_x = np.zeros_like(x)
+    for i in range(len(x)):
+        median_filtered_x[i] = np.median(x[max(i-size//2, 0):
+                                           min(i+size//2, len(x)-1)])
+    return median_filtered_x
+
 if __name__ == '__main__':
     try:
         from scipy.ndimage import gaussian_filter
     except ImportError:
         def gaussian_filter(x, sigma): return x # No blurring; whatever.
-    ## Simple debugging tests. Put a 2D TIF where python can find it.
+    ## Simple debugging tests. Put a 2D TIF called 'blobs.tif' where
+    ## python can find it.
     print("Loading test object...")
     obj = np_tif.tif_to_array('blobs.tif').astype(np.float64)
     print(" Done.")
