@@ -26,7 +26,9 @@ class Analog_Out:
 
         So far, I've only tested this for the PCI 6733 and the NI 9263.
         """
-        assert daq_type in ('6733', '6733_digital', '9263', '9401', '6001')
+        assert daq_type in (
+            '6733', '6733_digital', '6738', '6738_digital', '9263', '9401',
+            '6001'), "We don't support this card (%s) yet" % daq_type
         self.daq_type = daq_type
         if self.daq_type == '6733':
             self.max_channels = 8
@@ -55,6 +57,19 @@ class Analog_Out:
             # ao.play_voltages(block=True)  # Plays both types, synchronized
             self.max_channels = 8
             self.max_rate = 1e6
+            self.channel_type = 'digital'
+            self.has_clock = False
+        elif self.daq_type == '6738':
+            self.max_channels = 32
+            self.max_rate = 1e6 #TODO is this the correct max rate?
+            self.channel_type = 'analog'
+            self.has_clock = True
+        elif self.daq_type == '6738_digital':
+            # WARNING: See note about 6733_digital lines. Also note that there
+            # are 8 digital lines on `port1`, but these are not "buffered". We
+            # have not yet included any functionality for these lines.
+            self.max_channels = 2
+            self.max_rate = 1e6 #TODO is this the correct max rate?
             self.channel_type = 'digital'
             self.has_clock = False
         elif self.daq_type == '9263':
@@ -210,10 +225,10 @@ class Analog_Out:
         voltage I should use on the analog out card to get this many
         seconds. Frequently I get this math wrong. That's why I wrote
         this function.
-        ''' 
+        '''
         num_pixels = int(round(self.rate * seconds))
         return num_pixels
-        
+
     def p2s(self, num_pixels):
         '''Convert a  number of AO "pixels to a duration in seconds."
 
@@ -221,7 +236,7 @@ class Analog_Out:
         the analog out card, and I do simple math to convert this to how
         many seconds I'm playing that voltage for. Frequently I get this
         math wrong. That's why I wrote this function.
-        ''' 
+        '''
         seconds = num_pixels / self.rate
         return seconds
 
@@ -373,11 +388,34 @@ if __name__ == '__main__':
 
 ## This block tests an AO/DO play of 9401/9263 cards in a cDAQ-9174 chassis.
 
+    ## 6733 test block
+    # rate = 2e4
+    # do_type = '6733_digital'
+    # do_name = 'Dev1'
+    # do_nchannels = 8
+    # do_clock = '/Dev1/ao/SampleClock'
+    # do = Analog_Out(
+    #     num_channels=do_nchannels,
+    #     rate=rate,
+    #     daq_type=do_type,
+    #     board_name=do_name,
+    #     clock_name=do_clock,
+    #     verbose=False)
+    # ao_type = '6733'
+    # ao_name = 'Dev1'
+    # ao_nchannels = 8
+    # ao = Analog_Out(
+    #     num_channels=ao_nchannels,
+    #     rate=rate,
+    #     daq_type=ao_type,
+    #     board_name=ao_name,
+    #     verbose=False)
 
+    ## 6738 test block
     rate = 2e4
-    do_type = '6733_digital'
+    do_type = '6738_digital'
     do_name = 'Dev1'
-    do_nchannels = 8
+    do_nchannels = 2
     do_clock = '/Dev1/ao/SampleClock'
     do = Analog_Out(
         num_channels=do_nchannels,
@@ -386,7 +424,7 @@ if __name__ == '__main__':
         board_name=do_name,
         clock_name=do_clock,
         verbose=False)
-    ao_type = '6733'
+    ao_type = '6738'
     ao_name = 'Dev1'
     ao_nchannels = 8
     ao = Analog_Out(
@@ -395,3 +433,11 @@ if __name__ == '__main__':
         daq_type=ao_type,
         board_name=ao_name,
         verbose=False)
+    digits = np.zeros((do.s2p(1), do_nchannels), np.dtype(np.uint8))
+    volts = np.zeros((ao.s2p(1), ao_nchannels), np.dtype(np.float64))
+    digits[do.s2p(.25):do.s2p(.75), :] = 1
+    volts[ao.s2p(.25):ao.s2p(.75), :] = 10
+    do.play_voltages(digits, block=False)
+    ao.play_voltages(volts, block=True)
+    do.close()
+    ao.close()
