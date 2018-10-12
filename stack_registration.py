@@ -571,15 +571,15 @@ def _smooth_rfft2(x):
     Stacky is one step closer to what it should be.
     """
     assert len(x.shape) == 2
-    v = np.zeros_like(x)
-    v[0,  :] += x[-1, :] - x[0,  :]
-    v[:,  0] += x[:, -1] - x[:,  0]
+    v = np.zeros(x.shape, dtype=np.float64)
+    v[0,  :] += np.subtract(x[-1, :], x[0,  :], dtype=np.float64)
+    v[:,  0] += np.subtract(x[:, -1], x[:,  0], dtype=np.float64)
     v[-1, :] += -v[0, :]
     v[:, -1] += -v[:, 0]
     v_rfft = np.fft.rfft2(v)
     q = np.arange(v_rfft.shape[0]).reshape(v_rfft.shape[0], 1)
     r = np.arange(v_rfft.shape[1]).reshape(1, v_rfft.shape[1])
-    denominator = (2*np.cos(q * (2*np.pi / x.shape[0])) + 
+    denominator = (2*np.cos(q * (2*np.pi / x.shape[0])) +
                    2*np.cos(r * (2*np.pi / x.shape[1])) - 4)
     denominator[0, 0] = 1 # Hack to avoid divide-by-zero
     smooth_rfft = v_rfft / denominator
@@ -666,8 +666,8 @@ if __name__ == '__main__':
               '%0.2f (%i)'%(cs[1] * bucket_size[2], s[1]))
 
     # Now we test rotational alignment, on top of translational alignment
-    input("Hit enter to test rotational registration...\n" + 
-          " (This will overwrite some of the DEBUG_* files" + 
+    input("Hit enter to test rotational registration...\n" +
+          " (This will overwrite some of the DEBUG_* files" +
           " from translational registration)")
     print("Creating rotated and shifted stack from test object...")
     angles_deg = [180*np.random.random()-90 for s in shifts]
