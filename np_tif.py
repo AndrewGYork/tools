@@ -4,6 +4,7 @@ def tif_to_array(
     filename,
     image_descriptions=False,
     verbose=False,
+    which_ifd = 'all',
     ):
     """Load a tif into memory and return it as a numpy array.
 
@@ -13,6 +14,8 @@ def tif_to_array(
     reader.
     """
     ifds, endian = parse_tif(filename, verbose)
+    if which_ifd != 'all': # Only load one image from the file
+        ifds = [ifds[which_ifd]]
     """
     Ensure that the various IFD's are consistent: same length, width,
     bit depth, data format, etc.
