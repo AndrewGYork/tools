@@ -1,4 +1,11 @@
+import os
+import subprocess
 import numpy as np
+# import tkinter
+#
+# The 'run_imagej_macro' function might import tkinter, so I list it
+# here to make it easier for folks who are used to glancing at the top
+# of a file and seeing a complete list of imports.
 
 def tif_to_array(
     filename,
@@ -454,11 +461,77 @@ def bytes_to_int(x, endian): #Isn't there a builtin to do this...?
     else:
         raise UserWarning("'endian' must be either big or little")
 
+def run_imagej_macro(x,
+                     macro_filename='temporary_macro.ijm',
+                     macro_text=None,
+                     gui=True,
+                     ):
+    # WARNING STILL IN BETA DON'T COUNT ON THIS NOT CHANGING
+    """Run an imagej macro on a 2d or 3d numpy array and return the result.
+
+    The ImageJ macro must take one input argument (a filename), save its
+    results as a tif with that filename, and then quit Imagej.
+
+    An example of a minimal macro which doubles its input:
+    
+output_filename = getArgument;
+run("Multiply...", "value=2");
+saveAs("Tiff", output_filename);
+run("Quit");
+
+    Alternatively, you can specify 'macro_text' instead of saving a
+    macro to disk:
+    run_imagej_macro(x, macro_text='run("Multiply...", "value=2");')
+    """
+    imagej_path = get_imagej_path(gui)
+    input_filename = 'input_to_imagej.tif'
+    output_filename = 'output_from_imagej.tif'
+    array_to_tif(x, input_filename)
+    if macro_text is not None:
+        with open(macro_filename, 'w') as mf:
+            mf.write('output_filename = getArgument;\n')
+            mf.write(macro_text + '\n')
+            mf.write('saveAs("Tiff", output_filename);')
+            mf.write('run("Quit");')
+    subprocess.run([imagej_path,
+                    '-i', input_filename,
+                    '-m', macro_filename,
+                    output_filename])
+    while not os.path.isfile(output_filename):
+        pass
+    result = tif_to_array(output_filename)
+    os.remove(input_filename)
+    os.remove(output_filename)
+    if macro_text is not None: os.remove(macro_filename)
+    return result
+
+def get_imagej_path(gui=True):
+    filename = os.path.join(os.getcwd(), 'imagej_path.txt')
+    if os.path.isfile(filename):
+        with open(filename, 'rt') as f:
+            imagej_path = f.read().strip()
+        if os.path.isfile(imagej_path):
+            return imagej_path
+    if gui:
+        import tkinter as tk
+        from tkinter import filedialog
+        root = tk.Tk()
+        imagej_path = tk.filedialog.askopenfilename(
+            title="Where is the ImageJ executable?",
+            initialdir=os.getcwd(),
+            initialfile='ImageJ.exe')
+        root.destroy()
+        if not os.path.isfile(imagej_path):
+            raise FileNotFoundError("ImageJ path doesn't point to a file")
+        with open(filename, 'w') as f:
+            f.write(imagej_path)
+        return imagej_path
+    raise FileNotFoundError("imagej_path.txt didn't point to a file")
+
 if __name__ == '__main__':
     """
     Simple tests, not comprehensive.
     """
-    import os
     
     for a in (
         np.random.random_sample((30, 432, 500)),
