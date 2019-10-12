@@ -254,11 +254,11 @@ def parse_picoharp_t3_frame(
     x_pos   = x_pos[electrons].copy()
     channel = channel[electrons].copy()
     dtime   = dtime[electrons].copy()
+    num_pulses = num_pulses[electrons].copy()
     if show_plot:
         if plt is None:
             raise UserWarning(
                 "Failed to import matplotlib; you won't be able to plot.")
-        num_pulses = num_pulses[electrons].copy()
         t = num_pulses * tags['MeasDesc_GlobalResolution']['values'][0]
         fig = plt.figure()
         plt.plot(t, y_pos / y_pos.max(), label='Y pos.')
@@ -277,7 +277,7 @@ def parse_picoharp_t3_frame(
         print('', len(channel), "electrons")
         for ch in range(1, 5):
             print(' ', (channel == ch).sum(), "electrons in channel", ch)
-    return {'tags': tags,
+    return {'tags': tags, 'num_pulses': num_pulses,
             'dtime':   dtime, 'channel': channel,
             'y_pixel': y_pos, 'x_pixel': x_pos}
 
@@ -293,7 +293,7 @@ def parsed_frame_to_histogram(
     np.histogramdd. If you don't, this function is a convenient way to
     get a histogram without thinking too hard.
 
-    '*_bin_size' lets you choose how many pixels per bin. The parsed
+    '*_pix_per_bin' lets you choose how many pixels per bin. The parsed
     frame data already has opinions about the x/y pixel size. Since dtime
     for the Picoharp T3 format is 12-bit, we'll use 2**12 time bins to
     define the native time pixel size.
