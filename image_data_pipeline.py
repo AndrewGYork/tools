@@ -662,12 +662,6 @@ class Display:
         ):
         import warnings
         import pyglet
-        pyglet_version = getattr(pyglet, 'version', '0.0.0')
-        if version.parse(pyglet_version) < version.parse('1.3'):
-            info(f'Old version of pyglet (v{pyglet_version}) was detected.')
-            info(f'This version has not been tested' +
-                   ' and is not guaranteed to work.')
-            info(f'To get rid of this message, please upgrade pyglet >= v1.3.')
         self.pyg = pyglet
         try:
             with warnings.catch_warnings():
