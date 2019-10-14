@@ -1036,8 +1036,7 @@ class Display:
         return None
 
     def _get_screen_dimensions(self):
-        plat = self.pyg.window.Platform()
-        disp = plat.get_default_display()
+        disp = self.pyg.canvas.get_display()
         screen = disp.get_default_screen()
         return screen.width, screen.height
 
