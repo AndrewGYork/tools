@@ -172,7 +172,7 @@ class ArrayInterfaceImage(ImageData):
         '''Force an update of the texture data.
         '''
 
-        texture = self.texture
+        texture = self.get_texture()
         internalformat = None
         self.blit_to_texture(
             texture.target, texture.level, 0, 0, 0, internalformat )
