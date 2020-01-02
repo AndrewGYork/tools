@@ -107,9 +107,9 @@ def stack_registration(
         current_slice_ft_periodic = (current_slice_ft -
                                      _smooth_rfft2(s[which_slice, :, :]))
         cross_power_spectrum = current_slice_ft_periodic * ref_slice_ft_conj
-        cross_power_spectrum = (fourier_mask *
-                                cross_power_spectrum /
-                                np.abs(cross_power_spectrum))
+        norm = np.abs(cross_power_spectrum)
+        norm[norm==0] = 1
+        cross_power_spectrum = (fourier_mask * cross_power_spectrum / norm)
         ## Inverse transform to get a 'spike' in real space. The
         ## location of this spike gives the desired registration shift.
         ## Start by locating the spike to the nearest integer:
