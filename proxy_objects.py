@@ -15,6 +15,7 @@ import signal
 import io
 from contextlib import redirect_stdout
 
+
 """
 Sometimes we put a computationally demanding Python object in a
 multiprocessing child process, but this usually leads to high mental
@@ -81,52 +82,79 @@ class ProxyManager:
         return ProxyObject(initializer, *init_args, **init_kwargs,
                            shared_mp_arrays=self.shared_mp_arrays)
 
-    def shared_numpy_array(self, shape, dtype, which_mp_array):
+    def shared_numpy_array(self, shape, which_mp_array=0, dtype=np.uint8):
         assert which_mp_array in range(len(self.shared_mp_arrays))
         return _SharedNumpyArray(
-            shape, dtype, self.shared_mp_arrays, which_mp_array)
+            buffer=which_mp_array, arrays=self.shared_mp_arrays,
+            shape=shape, dtype=dtype)
 
-class _SharedNumpyArray:
-    def __init__(self, shape, dtype, shared_mp_arrays, which_mp_array):
-        assert all(s > 0 for s in shape)
-        assert all(int(s) == s for s in shape)
+class _SharedNumpyArrayStub():
+    def __init__(self, shape=None, dtype=float, buffer=None, offset=0,
+                 strides=None, order=None):
+        if shape is None:
+            raise TypeError("Missing required argument 'shape'.")
+        if buffer is None:
+            raise TypeError("Missing required argument 'buffer'.")
         self.shape = shape
-        self.dtype = np.dtype(dtype)
-        self.which_mp_array = which_mp_array
-        if shared_mp_arrays is not None:
-            self._restore_from_stub(shared_mp_arrays)
+        self.dtype = dtype
+        self.buffer = buffer
+        self.offset = offset
+        self.strides = strides
+        self.order = order
 
-    def __enter__(self):
-        self.shared_mp_arrays[self.which_mp_array].get_lock().acquire()
-        return self._as_numpy()
+    def _reconnect(self, arrays):
+        return _SharedNumpyArray(arrays, self.shape, self.dtype, self.buffer,
+                                 self.offset, self.strides, self.order)
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.shared_mp_arrays[self.which_mp_array].get_lock().release()
-
-    def _as_numpy(self):
-        """View the underlying multiprocessing array as a numpy array
-        """
-        assert self.shared_mp_arrays is not None
-        return np.frombuffer(
-            self.shared_mp_arrays[self.which_mp_array].get_obj(),
-            count=np.prod(self.shape), dtype=self.dtype).reshape(self.shape)
-
-    def _to_stub(self):
-        """A copy that doesn't reference any shared memory.
-
-        Useful for passing down pipes, if the process on the other side
-        reconnects it to the shared memory on the other end.
-        """
-        return _SharedNumpyArray(
-            self.shape, self.dtype, None, self.which_mp_array)
-
-    def _restore_from_stub(self, shared_mp_arrays):
-        assert self.which_mp_array in range(len(shared_mp_arrays))
-        if (np.prod(self.shape) * self.dtype.itemsize >
-            len(shared_mp_arrays[self.which_mp_array])):
+class _SharedNumpyArray(np.ndarray):
+    def __new__(cls, arrays, shape=None, dtype=float, buffer=None, offset=0,
+                strides=None, order=None):
+        dtype = np.dtype(dtype)
+        assert buffer in range(len(arrays)), f'Invalid buffer: <{buffer}>'
+        requested_bytes = np.prod(shape) * dtype.itemsize
+        if requested_bytes > len(arrays[buffer]):
             raise ValueError("Multiprocessing shared memory array is too "+
-                             "small to hold the requested Numpy array")
-        self.shared_mp_arrays = shared_mp_arrays
+                             "small to hold the requested Numpy array.\n " +
+                             f"{requested_bytes} > {len(arrays[buffer])}")
+        obj = super(_SharedNumpyArray, cls).__new__(cls, shape, dtype,
+                                                    arrays[buffer].get_obj(),
+                                                    offset, strides, order)
+        obj.buffer = buffer
+        return obj
+
+    def _disconnect(self):
+        return _SharedNumpyArrayStub(shape=self.shape, dtype=self.dtype,
+                                     buffer=self.buffer,
+                                     offset=getattr(self, 'offset', 0),
+                                     strides=self.strides,
+                                     order=None)
+
+    def __array_finalize__(self, obj):
+        if obj is None: return
+        self.offset = (
+            self.__array_interface__['data'][0] -
+            obj.__array_interface__['data'][0])
+        self.buffer = getattr(obj, 'buffer', None)
+
+def _disconnect_shared_arrays(args, kwargs):
+    # Replaces shared arrays in the args and kwargs with new stubs
+    args = tuple(a._disconnect()
+                 if isinstance(a, _SharedNumpyArray) else a
+                 for a in args)
+    kwargs = {k: v._disconnect()
+              if isinstance(v, _SharedNumpyArray) else v
+              for k, v in kwargs.items()}
+    return args, kwargs
+
+def _reconnect_shared_arrays(args, kwargs, shared_arrays):
+    # Replaces stubs in the args and kwargs with new shared arrays
+    args = tuple(a._reconnect(shared_arrays)
+                 if isinstance(a, _SharedNumpyArrayStub) else a
+                 for a in args)
+    kwargs = {k: v._reconnect(shared_arrays)
+              if isinstance(v, _SharedNumpyArrayStub) else v
+              for k, v in kwargs.items()}
+    return args, kwargs
 
 class ProxyObject:
     def __init__(
@@ -183,24 +211,6 @@ class ProxyObject:
         self.parent_pipe.send(('__setattr__', (name, value), {}))
         return _get_response(self)
 
-def _disconnect_shared_arrays(args, kwargs):
-    # Replaces shared arrays in the args and kwargs with new stubs
-    new_args = tuple(a._to_stub() if isinstance(a, _SharedNumpyArray) else a
-                     for a in args)
-    new_kwargs = {}
-    for k, v in kwargs.items():
-        new_kwargs[k] = v._to_stub() if isinstance(v, _SharedNumpyArray) else v
-    return new_args, new_kwargs
-
-def _reconnect_shared_arrays(args, kwargs, shared_arrays):
-    # Restores stubs in-place in the args and kwargs
-    for a in args:
-        if isinstance(a, _SharedNumpyArray):
-            a._restore_from_stub(shared_arrays)
-    for v in kwargs.values():
-        if isinstance(v, _SharedNumpyArray):
-            v._restore_from_stub(shared_arrays)
-    return None
 
 def _get_response(proxy_object):
     resp, printed_output = proxy_object.parent_pipe.recv()
@@ -208,6 +218,8 @@ def _get_response(proxy_object):
         print(printed_output, end='')
     if isinstance(resp, Exception):
         raise resp
+    if isinstance(resp, _SharedNumpyArrayStub):
+        resp = resp._reconnect(proxy_object.shared_mp_arrays)
     return resp
 
 def _close(proxy_object):
@@ -219,7 +231,7 @@ def _close(proxy_object):
 def _child_loop(initializer, args, kwargs, child_pipe, shared_arrays):
     # If any of the input arguments are _SharedNumpyArrays, we have to
     # show them where to find shared memory:
-    _reconnect_shared_arrays(args, kwargs, shared_arrays)
+    args, kwargs = _reconnect_shared_arrays(args, kwargs, shared_arrays)
     # Initialization.
     printed_output = io.StringIO()
     try: # Create an instance of our object...
@@ -240,12 +252,14 @@ def _child_loop(initializer, args, kwargs, child_pipe, shared_arrays):
         if cmd is None: # This is how the parent signals us to exit.
             return None
         attr_name, args, kwargs = cmd
-        _reconnect_shared_arrays(args, kwargs, shared_arrays)
+        args, kwargs = _reconnect_shared_arrays(args, kwargs, shared_arrays)
         try:
             with redirect_stdout(printed_output):
                 result = getattr(obj, attr_name)(*args, **kwargs)
             if callable(result):
                 result = _dummy_function # Cheaper than sending a real callable
+            if isinstance(result, _SharedNumpyArray):
+                result = result._disconnect()
             child_pipe.send((result, printed_output.getvalue()))
         except Exception as e:
             e.child_traceback_string = traceback.format_exc()
@@ -302,8 +316,17 @@ class TestClass:
         return (args, kwargs)
 
     def test_shared_numpy_input(self, shared_numpy_array):
-        with shared_numpy_array as x:
-            print(x)
+        return shared_numpy_array.shape
+
+    def test_shared_numpy_return(self, shape=(5,5)):
+        return _SharedNumpyArray(shape=shape)
+
+    def test_modify_array(self, a):
+        a.fill(1)
+        return a
+
+    def test_return_array(self, a):
+        return a
 
     def nested_method(self, crash=False):
         self._nested_method(crash)
@@ -315,17 +338,85 @@ class TestClass:
 def main():
     import time
 
+    ## Tests
+    def test_array_serialization_input(shape, dtype, loops):
+        name = 'serialization (input)'
+        sz = int(np.prod(shape)*np.dtype(int).itemsize)
+        pm = ProxyManager((sz, sz))
+        object_with_shared_memory = pm.proxy_object(TestClass)
+        np_array = np.zeros(shape=shape, dtype=dtype)
+        start = time.perf_counter()
+        for i in range(loops):
+            object_with_shared_memory.test_shared_numpy_input(np_array)
+        end = time.perf_counter()
+        print(f" {1e6*(end - start) / loops:0.2f} \u03BCs "
+              f"per {shape} array {name}.")
+
+    def test_array_reference_input(shape, dtype, loops):
+        name = 'reference (input)'
+        sz = int(np.prod(shape)*np.dtype(dtype).itemsize)
+        pm = ProxyManager((sz, sz))
+        object_with_shared_memory = pm.proxy_object(TestClass)
+        shared_np_array = pm.shared_numpy_array(shape, 0, dtype=dtype)
+        start = time.perf_counter()
+        for i in range(loops):
+            object_with_shared_memory.test_shared_numpy_input(shared_np_array)
+        end = time.perf_counter()
+        print(f" {1e6*(end - start) / loops:0.2f} \u03BCs "
+              f"per {shape} array {name}.")
+
+    def test_array_reference_roundtrip(shape, dtype, loops):
+        name = 'reference (round trip)'
+        sz = int(np.prod(shape)*np.dtype(dtype).itemsize)
+        pm = ProxyManager((sz, sz))
+        object_with_shared_memory = pm.proxy_object(TestClass)
+        shared_np_array = pm.shared_numpy_array(shape, 0, dtype=dtype)
+        start = time.perf_counter()
+        for i in range(loops):
+            object_with_shared_memory.test_return_array(shared_np_array)
+        end = time.perf_counter()
+        print(f" {1e6*(end - start) / loops:0.2f} \u03BCs "
+              f"per {shape} array {name}.")
+
+    def test_array_serialization_roundtrip(shape, dtype, loops):
+        name = 'serialization (round trip)'
+        sz = int(np.prod(shape)*np.dtype(dtype).itemsize)
+        pm = ProxyManager((sz, sz))
+        object_with_shared_memory = pm.proxy_object(TestClass)
+        np_array = np.zeros(shape=shape, dtype=dtype)
+        start = time.perf_counter()
+        for i in range(loops):
+            object_with_shared_memory.test_return_array(np_array)
+        end = time.perf_counter()
+        print(f" {1e6*(end - start) / loops:0.2f} \u03BCs "
+              f"per {shape} array {name}.")
+
     pm = ProxyManager((10, 20))
     object_with_shared_memory = pm.proxy_object(TestClass)
-    data = pm.shared_numpy_array(
-        shape=(10,),
-        dtype=np.uint8,
-        which_mp_array=0)
-    with data as x:
-        x[3] = 7
+    data = np.ndarray(shape=(10, 10))
     print("Testing printing a shared numpy array in the child process:")
+
+    print("Test passing a normal array")
     object_with_shared_memory.test_shared_numpy_input(data)
 
+    print('Testing creating a special array in the child')
+    # z = object_with_shared_memory.test_shared_numpy_return()
+    # print('Returned array', z.shape, type(z))
+
+    print('Test passing a special array to the child')
+    shape = (10, 10)
+    dtype = int
+    sz = int(np.prod(shape)*np.dtype(int).itemsize)
+    pm = ProxyManager((sz, sz))
+    object_with_shared_memory = pm.proxy_object(TestClass)
+    a = pm.shared_numpy_array(which_mp_array=0, shape=shape, dtype=dtype)
+    a.fill(0)
+    # b = a[::2, :] ## TODO: write tests for arbitrary slicing/viewing
+    # b.fill(1)
+    print(a.shape, type(a), a.dtype, a.buffer, a.sum())
+    a = object_with_shared_memory.test_modify_array(a)
+    print(a.shape, type(a), a.dtype, a.buffer, a.sum())
+    assert a.sum() == np.product(shape), 'Contents of array not correct!'
     a = ProxyObject(TestClass, 'attribute', x=4,)
     b = ProxyObject(TestClass, x=5)
     print("\nTesting printing from child process:")
@@ -341,6 +432,8 @@ def main():
         a.z
     except AttributeError as e:
         print("Attribute error handled by parent process:\n ", e)
+
+
     print("\nTesting overhead:")
     num_gets = 10000
     start = time.perf_counter()
@@ -373,6 +466,27 @@ def main():
     end = time.perf_counter()
     print(" %0.2f \u03BCs per parent-handled exception."%(
         1e6*(end - start) / num_exceptions))
+
+    shape = (10, 10)
+    dtype = np.uint8
+    loops = 100
+    test_array_reference_input(shape, dtype, loops)
+    test_array_serialization_input(shape, dtype, loops)
+    test_array_reference_roundtrip(shape, dtype, loops)
+    test_array_serialization_roundtrip(shape, dtype, loops)
+
+    shape = (1000, 1000)
+    dtype = np.uint8
+    loops = 100
+    test_array_reference_input(shape, dtype, loops)
+    test_array_serialization_input(shape, dtype, loops)
+    test_array_reference_roundtrip(shape, dtype, loops)
+    test_array_serialization_roundtrip(shape, dtype, loops)
+
+
+
+
+
 
 
 if __name__ == '__main__':
