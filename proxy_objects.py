@@ -179,12 +179,17 @@ class ProxyObject:
             args=(initializer, initargs, initkwargs,
                   child_pipe, shared_mp_arrays))
         # Attribute-setting looks weird because we override __setattr__:
-        super().__setattr__('parent_pipe', parent_pipe)
-        super().__setattr__('child_pipe', child_pipe)
-        super().__setattr__('child_process', child_process)
-        super().__setattr__('shared_mp_arrays', shared_mp_arrays)
+        super().__setattr__('_', DummyClass())
+        self._.parent_pipe = parent_pipe
+        self._.child_pipe = child_pipe
+        self._.child_process = child_process
+        self._.shared_mp_arrays = shared_mp_arrays
+        # super().__setattr__('parent_pipe', parent_pipe)
+        # super().__setattr__('child_pipe', child_pipe)
+        # super().__setattr__('child_process', child_process)
+        # super().__setattr__('shared_mp_arrays', shared_mp_arrays)
         # Make sure the child process initialized successfully:
-        self.child_process.start()
+        self._.child_process.start()
         assert _get_response(self) == 'Successfully initialized'
         # Try to ensure the child process closes when we exit:
         atexit.register(lambda: _close(self))
@@ -198,35 +203,35 @@ class ProxyObject:
         possible, even though they actually involve asking the child
         process over a pipe.
         """
-        self.parent_pipe.send(('__getattribute__', (name,), {}))
+        self._.parent_pipe.send(('__getattribute__', (name,), {}))
         attr = _get_response(self)
         if callable(attr):
             def attr(*args, **kwargs):
                 args, kwargs = _disconnect_shared_arrays(args, kwargs)
-                self.parent_pipe.send((name, args, kwargs))
+                self._.parent_pipe.send((name, args, kwargs))
                 return _get_response(self)
         return attr
 
     def __setattr__(self, name, value):
-        self.parent_pipe.send(('__setattr__', (name, value), {}))
+        self._.parent_pipe.send(('__setattr__', (name, value), {}))
         return _get_response(self)
 
 
 def _get_response(proxy_object):
-    resp, printed_output = proxy_object.parent_pipe.recv()
+    resp, printed_output = proxy_object._.parent_pipe.recv()
     if len(printed_output) > 0:
         print(printed_output, end='')
     if isinstance(resp, Exception):
         raise resp
     if isinstance(resp, _SharedNumpyArrayStub):
-        resp = resp._reconnect(proxy_object.shared_mp_arrays)
+        resp = resp._reconnect(proxy_object._.shared_mp_arrays)
     return resp
 
 def _close(proxy_object):
-    if not proxy_object.child_process.is_alive():
+    if not proxy_object._.child_process.is_alive():
         return
-    proxy_object.parent_pipe.send(None)
-    proxy_object.child_process.join()
+    proxy_object._.parent_pipe.send(None)
+    proxy_object._.child_process.join()
 
 def _child_loop(initializer, args, kwargs, child_pipe, shared_arrays):
     # If any of the input arguments are _SharedNumpyArrays, we have to
@@ -269,6 +274,9 @@ def _child_loop(initializer, args, kwargs, child_pipe, shared_arrays):
 # the parent, it might as well be small and simple:
 def _dummy_function():
     return None
+
+class DummyClass:
+    pass
 
 # When an exception from the child process isn't handled by the parent
 # process, we'd like the parent to print the child traceback. Overriding
