@@ -1,4 +1,5 @@
 import multiprocessing as mp
+import threading
 # Sharing memory between child processes is tricky:
 import ctypes as C
 try:
@@ -184,6 +185,7 @@ class ProxyObject:
         self._.child_pipe = child_pipe
         self._.child_process = child_process
         self._.shared_mp_arrays = shared_mp_arrays
+        self._.fifo_queue = FIFOLock()
         # Make sure the child process initialized successfully:
         self._.child_process.start()
         assert _get_response(self) == 'Successfully initialized'
@@ -211,6 +213,12 @@ class ProxyObject:
     def __setattr__(self, name, value):
         self._.parent_pipe.send(('__setattr__', (name, value), {}))
         return _get_response(self)
+
+    def __enter__(self):
+        return self._.fifo_queue.acquire()
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        return self._.fifo_queue.release()
 
 
 def _get_response(proxy_object):
@@ -273,6 +281,76 @@ def _dummy_function():
 
 class DummyClass:
     pass
+
+class FIFOLock:
+    """Like threading.Lock, but releases first-in/first-out to blocking threads.
+
+    From the guy who made timsort! https://stackoverflow.com/a/19695878
+
+    Suppose you have several shared resources that each proceed at their
+    own speed (for example, camera, processing, gui, disk), and
+    several threads executing a task like:
+
+    def snap():
+        raw_image = camera.record()
+        image = processing(raw_image)
+        gui.display(image)
+        disk.save(raw_image)
+
+    We want each thread to proceed at top speed, but we also want each
+    thread to wait its turn before accessing a one-at-a-time shared
+    resource:
+
+    def snap():
+        with camera_lock:
+            raw_image = camera.record()
+        with processing_lock:
+            image = processing(raw_image)
+        with display_lock:
+            gui.display(image)
+        disk.save(raw_image)
+
+    Suppose the camera was much faster than processing, and we launch
+    several snap() threads at once; we could easily end up with multiple
+    snap() threads blocking on processing simultaneously. If our locks
+    were instances of threading.Lock, image 3 will sometimes be
+    processed and displayed before image 2. This is bad! If we use a
+    FIFOLock instead, images will display in the same order that the
+    camera records them. This is good.
+    """
+    def __init__(self):
+        self.lock = threading.Lock() # A lock for your lock!
+        self.waiters = [] # could be a deque if we want to get faster...
+        self.count = 0
+
+    def acquire(self):
+        with self.lock:
+            if self.count > 0: # Someone else has custody, get in line
+                new_lock = threading.Lock()
+                new_lock.acquire()
+                self.waiters.append(new_lock)
+                self.lock.release()
+                new_lock.acquire() # Block here until another thread releases
+                self.lock.acquire()
+            self.count += 1
+        return True
+
+    def release(self):
+        with self.lock:
+            if not self.locked():
+                raise RuntimeError("Can't release a lock that isn't locked")
+            self.count -= 1
+            if len(self.waiters) > 0:
+                self.waiters.pop(0).release() # Call the next-in-line
+
+    def locked(self):
+        return self.count > 0
+
+    def __enter__(self):
+        return self.acquire()
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        return self.release()
 
 # When an exception from the child process isn't handled by the parent
 # process, we'd like the parent to print the child traceback. Overriding
