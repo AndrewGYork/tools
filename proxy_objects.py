@@ -184,10 +184,6 @@ class ProxyObject:
         self._.child_pipe = child_pipe
         self._.child_process = child_process
         self._.shared_mp_arrays = shared_mp_arrays
-        # super().__setattr__('parent_pipe', parent_pipe)
-        # super().__setattr__('child_pipe', child_pipe)
-        # super().__setattr__('child_process', child_process)
-        # super().__setattr__('shared_mp_arrays', shared_mp_arrays)
         # Make sure the child process initialized successfully:
         self._.child_process.start()
         assert _get_response(self) == 'Successfully initialized'
