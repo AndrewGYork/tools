@@ -380,197 +380,377 @@ if mp.get_start_method(allow_none=True) != 'spawn':
 
 
 # Testing block.
-class TestClass:
-    def __init__(self, *args, **kwargs):
-        for k, v in kwargs.items():
-            setattr(self, k, v)
-        for i, a in enumerate(args):
-            setattr(self, f'arg_{i}', a)
 
-    def printing_method(self, *args, **kwargs):
-        print(*args, **kwargs)
 
-    def printing_method2(self):
-        print('Hello world 2', end='', flush=False)
-        print(end='', flush=True)
+class Tests():
+    '''
+    Method names that start with `test_` will be run.
 
-    def test_method(self, *args, **kwargs):
-        return (args, kwargs)
+    Use: _test_... method names for tests that are called as part
+    of a larger group.
+    '''
+    class TestClass:
+        def __init__(self, *args, **kwargs):
+            for k, v in kwargs.items():
+                setattr(self, k, v)
+            for i, a in enumerate(args):
+                setattr(self, f'arg_{i}', a)
 
-    def test_shared_numpy_input(self, shared_numpy_array):
-        return shared_numpy_array.shape
+        def printing_method(self, *args, **kwargs):
+            print(*args, **kwargs)
 
-    def test_shared_numpy_return(self, shape=(5,5)):
-        return _SharedNumpyArray(shape=shape)
+        def printing_method2(self):
+            print('Hello world 2', end='', flush=False)
+            print(end='', flush=True)
 
-    def test_modify_array(self, a):
-        a.fill(1)
-        return a
+        def test_method(self, *args, **kwargs):
+            return (args, kwargs)
 
-    def test_return_array(self, a):
-        return a
+        def test_shared_numpy_input(self, shared_numpy_array):
+            return shared_numpy_array.shape
 
-    def nested_method(self, crash=False):
-        self._nested_method(crash)
+        def test_shared_numpy_return(self, shape=(5,5)):
+            return _SharedNumpyArray(shape=shape)
 
-    def _nested_method(self, crash):
-        if crash:
-            raise ValueError('This error was supposed to be raised')
+        def test_modify_array(self, a):
+            a.fill(1)
+            return a
 
-def main():
-    import time
+        def test_return_array(self, a):
+            return a
 
-    ## Tests
-    def test_array_serialization_input(shape, dtype, loops):
-        name = 'serialization (input)'
+        def nested_method(self, crash=False):
+            self._nested_method(crash)
+
+        def _nested_method(self, crash):
+            if crash:
+                raise ValueError('This error was supposed to be raised')
+
+    def __init__(self):
+        print(f'{"#":#^80s}')
+        print(f'{" Running Tests ":#^80s}')
+        print(f'{"#":#^80s}')
+        self.tests = 0
+        self.passed = 0
+
+    def test_create_proxy_manager(self):
+        pm = ProxyManager((100, 100))
+
+    def test_create_proxy_object(self):
+        pm = ProxyManager((100, 100))
+        proxy_obj = pm.proxy_object(Tests.TestClass)
+
+    def test_reconnnecting_and_disconnecting_views(self):
+        pm = ProxyManager((int(1e9),))
+        for i in range(1000):
+            self._trial_slicing_of_shared_array(pm)
+
+    def _trial_slicing_of_shared_array(self, pm):
+        ri = np.random.randint # Just to get short lines
+        dtype = np.uint8 # TODO, choose a random choice
+        original_dimensions = tuple(
+            ri(2, 100) for d in range(ri(1, 5)))
+        slicer = tuple(
+            slice(
+                ri(0, a//2),
+                ri(0, a//2)*-1,
+                ri(1, min(6, a))
+                )
+            for a in original_dimensions)
+        a = pm.shared_numpy_array(shape=original_dimensions, dtype=dtype)
+        a.fill(0)
+        b = a[slicer] ## should be a view
+        b.fill(1)
+        expected_total = int(b.sum())
+        reloaded_total = b._disconnect()._reconnect(pm.shared_mp_arrays).sum()
+        assert expected_total == reloaded_total
+
+    def test_passing_normal_numpy_array(self):
+        shape = (10, 10)
+        dtype = int
         sz = int(np.prod(shape)*np.dtype(int).itemsize)
         pm = ProxyManager((sz, sz))
-        object_with_shared_memory = pm.proxy_object(TestClass)
-        np_array = np.zeros(shape=shape, dtype=dtype)
-        start = time.perf_counter()
-        for i in range(loops):
-            object_with_shared_memory.test_shared_numpy_input(np_array)
-        end = time.perf_counter()
-        print(f" {1e6*(end - start) / loops:0.2f} \u03BCs "
-              f"per {shape} array {name}.")
+        a = np.zeros(shape, dtype)
+        object_with_shared_memory = pm.proxy_object(Tests.TestClass)
+        object_with_shared_memory.test_shared_numpy_input(a)
 
-    def test_array_reference_input(shape, dtype, loops):
-        name = 'reference (input)'
-        sz = int(np.prod(shape)*np.dtype(dtype).itemsize)
+    def test_passing_retrieving_shared_array(self):
+        shape = (10, 10)
+        dtype = int
+        sz = int(np.prod(shape)*np.dtype(int).itemsize)
         pm = ProxyManager((sz, sz))
-        object_with_shared_memory = pm.proxy_object(TestClass)
-        shared_np_array = pm.shared_numpy_array(shape, 0, dtype=dtype)
-        start = time.perf_counter()
-        for i in range(loops):
-            object_with_shared_memory.test_shared_numpy_input(shared_np_array)
-        end = time.perf_counter()
-        print(f" {1e6*(end - start) / loops:0.2f} \u03BCs "
-              f"per {shape} array {name}.")
+        object_with_shared_memory = pm.proxy_object(Tests.TestClass)
+        a = pm.shared_numpy_array(which_mp_array=0, shape=shape, dtype=dtype)
+        a.fill(0)
+        a = object_with_shared_memory.test_modify_array(a)
+        assert a.sum() == np.product(shape), 'Contents of array not correct!'
 
-    def test_array_reference_roundtrip(shape, dtype, loops):
-        name = 'reference (round trip)'
-        sz = int(np.prod(shape)*np.dtype(dtype).itemsize)
-        pm = ProxyManager((sz, sz))
-        object_with_shared_memory = pm.proxy_object(TestClass)
-        shared_np_array = pm.shared_numpy_array(shape, 0, dtype=dtype)
-        start = time.perf_counter()
-        for i in range(loops):
-            object_with_shared_memory.test_return_array(shared_np_array)
-        end = time.perf_counter()
-        print(f" {1e6*(end - start) / loops:0.2f} \u03BCs "
-              f"per {shape} array {name}.")
-
-    def test_array_serialization_roundtrip(shape, dtype, loops):
-        name = 'serialization (round trip)'
-        sz = int(np.prod(shape)*np.dtype(dtype).itemsize)
-        pm = ProxyManager((sz, sz))
-        object_with_shared_memory = pm.proxy_object(TestClass)
-        np_array = np.zeros(shape=shape, dtype=dtype)
-        start = time.perf_counter()
-        for i in range(loops):
-            object_with_shared_memory.test_return_array(np_array)
-        end = time.perf_counter()
-        print(f" {1e6*(end - start) / loops:0.2f} \u03BCs "
-              f"per {shape} array {name}.")
-
-    pm = ProxyManager((10, 20))
-    object_with_shared_memory = pm.proxy_object(TestClass)
-    data = np.ndarray(shape=(10, 10))
-    print("Testing printing a shared numpy array in the child process:")
-
-    print("Test passing a normal array")
-    object_with_shared_memory.test_shared_numpy_input(data)
-
-    print('Testing creating a special array in the child')
-    # z = object_with_shared_memory.test_shared_numpy_return()
-    # print('Returned array', z.shape, type(z))
-
-    print('Test passing a special array to the child')
-    shape = (10, 10)
-    dtype = int
-    sz = int(np.prod(shape)*np.dtype(int).itemsize)
-    pm = ProxyManager((sz, sz))
-    object_with_shared_memory = pm.proxy_object(TestClass)
-    a = pm.shared_numpy_array(which_mp_array=0, shape=shape, dtype=dtype)
-    a.fill(0)
-    # b = a[::2, :] ## TODO: write tests for arbitrary slicing/viewing
-    # b.fill(1)
-    print(a.shape, type(a), a.dtype, a.buffer, a.sum())
-    a = object_with_shared_memory.test_modify_array(a)
-    print(a.shape, type(a), a.dtype, a.buffer, a.sum())
-    assert a.sum() == np.product(shape), 'Contents of array not correct!'
-    a = ProxyObject(TestClass, 'attribute', x=4,)
-    b = ProxyObject(TestClass, x=5)
-    print("\nTesting printing from child process:")
-    a.printing_method(a.x, '... ', end='', flush=False)
-    b.printing_method(b.x)
-    b.printing_method('Hello')
-    a.printing_method('Done!')
-    a.printing_method('A')
-    a.x = 4
-    a.printing_method('Hello', 'world', end='', flush=True)
-    print("\n\nTesting an exception raised in the child process:")
-    try:
-        a.z
-    except AttributeError as e:
-        print("Attribute error handled by parent process:\n ", e)
-
-
-    print("\nTesting overhead:")
-    num_gets = 10000
-    start = time.perf_counter()
-    for i in range(num_gets):
-        a.x
-    end = time.perf_counter()
-    print(" %0.2f \u03BCs per get-attribute."%(
-        1e6*(end - start) / num_gets))
-    num_sets = 10000
-    start = time.perf_counter()
-    for i in range(num_sets):
-        a.x = 4
-    end = time.perf_counter()
-    print(" %0.2f \u03BCs per set-attribute."%(
-        1e6*(end - start) / num_sets))
-    num_calls = 10000
-    start = time.perf_counter()
-    for i in range(num_calls):
-        a.test_method()
-    end = time.perf_counter()
-    print(" %0.2f \u03BCs per trivial method call."%(
-        1e6*(end - start) / num_calls))
-    num_exceptions = 10000
-    start = time.perf_counter()
-    for i in range(num_exceptions):
+    def test_raise_attribute_error(self):
+        a = ProxyObject(Tests.TestClass, 'attribute', x=4,)
         try:
             a.z
-        except AttributeError:
-            pass
-    end = time.perf_counter()
-    print(" %0.2f \u03BCs per parent-handled exception."%(
-        1e6*(end - start) / num_exceptions))
+        except AttributeError as e: # Get __this__ specific error
+            print("Attribute error handled by parent process:\n ", e)
 
-    shape = (10, 10)
-    dtype = np.uint8
-    loops = 100
-    test_array_reference_input(shape, dtype, loops)
-    test_array_serialization_input(shape, dtype, loops)
-    test_array_reference_roundtrip(shape, dtype, loops)
-    test_array_serialization_roundtrip(shape, dtype, loops)
-
-    shape = (1000, 1000)
-    dtype = np.uint8
-    loops = 100
-    test_array_reference_input(shape, dtype, loops)
-    test_array_serialization_input(shape, dtype, loops)
-    test_array_reference_roundtrip(shape, dtype, loops)
-    test_array_serialization_roundtrip(shape, dtype, loops)
+    def test_printing_in_child_process(self):
+        a = ProxyObject(Tests.TestClass, 'attribute', x=4,)
+        b = ProxyObject(Tests.TestClass, x=5)
+        b.printing_method('Hello')
+        a.printing_method('A')
+        a.printing_method('Hello', 'world', end='', flush=True)
+        a.printing_method('')
+        a.printing_method(a.x, '... ', end='', flush=False)
+        b.printing_method(b.x)
+        expected_output = 'Hello\nA\nHello world\n4 ... 5\n'
+        return expected_output
 
 
+    def test_setting_attribute_of_proxy(self):
+        a = ProxyObject(Tests.TestClass, 'attribute', x=4,)
+        a.z = 10
+        assert a.z == 10
+        setattr(a, 'z', 100)
+        assert a.z == 100
+
+    def test_getting_attribute_of_proxy(self):
+        a = ProxyObject(Tests.TestClass, 'attribute', x=4)
+        assert a.x == 4
+        assert getattr(a, 'x') == 4
+
+    def test_overhead(self):
+        n_loops = 10000
+        a = ProxyObject(Tests.TestClass, 'attribute', x=4,)
+        t = self.time_it(
+            n_loops, a.test_method, timeout_us=100, name='a.test_method')
+        print(f" {t:.2f} \u03BCs per trivial method call - {n_loops} loops")
+        t = self.time_it(
+            n_loops, lambda: a.x, timeout_us=100, name='a.x')
+        print(f" {t:.2f} \u03BCs per get-attribute - {n_loops} loops")
+        a.x = 4 ## test set attribute with normal syntax
+        t = self.time_it(n_loops, lambda: setattr(a, 'x', 5),
+                         timeout_us=100, name='setattr(a, "x", 5)')
+        print(f" {t:.2f} \u03BCs per set-attribute. - {n_loops} loops")
+        t = self.time_it(n_loops, lambda: a.z, fail=False, timeout_us=100,
+                         name='a.z (raises AttributeError)')
+        print(f" {t:.2f} \u03BCs per parent-handled exception. - {n_loops} loops")
+        self._test_passing_array_performance()
+
+    def _test_passing_array_performance(self):
+        from itertools import product
+        shape = (1000, 1000)
+        dtype = np.uint8
+        pass_methods = ['reference', 'serialization']
+        method_names = ['test_shared_numpy_input', 'test_modify_array']
+        shapes = [(10, 10), (1000, 1000)]
+        for s, f, m in product(shapes, method_names, pass_methods):
+            self._test_array_passing(m, f, s, dtype, 1000)
+
+    def _test_array_passing(self, pass_by, method_name, shape, dtype, n_loops):
+        dtype = np.dtype(dtype)
+        name = f'{pass_by} -- {method_name} -- {dtype.name}-{shape}'
+        sz = int(np.prod(shape)*np.dtype(int).itemsize)
+        pm = ProxyManager((sz, sz))
+        object_with_shared_memory = pm.proxy_object(Tests.TestClass)
+        if pass_by == 'reference':
+            a = pm.shared_numpy_array(shape, 0, dtype=dtype)
+            timeout_us = 5e3
+        elif pass_by == 'serialization':
+            a = np.zeros(shape=shape, dtype=dtype)
+            timeout_us = 1e6
+        func = getattr(object_with_shared_memory, method_name)
+        t_per_loop = self.time_it(n_loops, func, (a,), timeout_us=timeout_us,
+                                  name=name)
+        print(f' {t_per_loop:.2f} \u03BCs per {name}')
+
+    def test_FIFO(self):
+        import time
+        camera_queue = FIFOLock()
+        processing_queue = FIFOLock()
+        display_queue = FIFOLock()
+        disk_queue = FIFOLock()
+        acq_order = {'camera': [],
+                     'processing': [],
+                     'display': [],
+                     'disk': []}
+        def use_resource(thread_id):
+            for resource, name, duration in (
+                (camera_queue, 'camera', 0.05),
+                (processing_queue, 'processing', 0.2),
+                (display_queue, 'display', 0.05),
+                (disk_queue, 'disk', 0.3)
+                ):
+                print("Thread %i waiting in line for %s"%(thread_id, name))
+                with resource:
+                    print("Thread %i acquired %s"%(thread_id, name))
+                    acq_order[name].append(thread_id)
+                    time.sleep(duration)
+                print("Thread %i released %s"%(thread_id, name))
+        threads = []
+        n_threads = 4
+        for i in range(n_threads):
+            threads.append(threading.Thread(target=use_resource, args=(i,)))
+            threads[-1].start()
+        for th in threads:
+            th.join()
+        print("Acquisition order:")
+        for k, v in acq_order.items():
+            print(' ', (k + ':').ljust(12), v, sep='')
+            assert v == list(range(n_threads))
+
+    def test_proxy_fifo_lock(self):
+        import time
+
+        # Create proxy objects of resources to use.
+        # Each has a method that sleep for some ammount of time and
+        # returns `True`.
+        cam = ProxyObject(DummyCamera)
+        proc = ProxyObject(DummyProcessor)
+        gui = ProxyObject(DummyGUI)
+        fout = ProxyObject(DummyFileSaver)
+
+        threads = []
+        num_threads = 10 # Number of threads to start
+
+        # Create container to hold results
+        results = [[] for i in range(num_threads)]
+        acq_order = {'camera': [],
+                     'processing': [],
+                     'display': [],
+                     'disk': []}
+
+        def acquisition(thread_id, r):
+            with cam as locked:
+                r.append(cam.record(thread_id))
+                acq_order['camera'].append(thread_id)
+            with proc as locked:
+                r.append(proc.process(thread_id))
+                acq_order['processing'].append(thread_id)
+            with gui as locked:
+                r.append(gui.display(thread_id))
+                acq_order['display'].append(thread_id)
+            with fout as locked:
+                r.append(fout.save(thread_id))
+                acq_order['disk'].append(thread_id)
+
+        NUM_STEPS = 4 # matches the number of steps for check results.
+
+        for i in range(num_threads):
+            threads.append(
+                threading.Thread(
+                    target=acquisition,
+                    args=(i, results[i])))
+            threads[-1].start()
+
+        # Wait for threads
+        for th in threads:
+            th.join()
+
+        # Check results
+        for i, a in enumerate(results):
+            assert sum(a) == NUM_STEPS*i, f'{i}-{a}'
+        for r, th_o in acq_order.items():
+            assert sorted(th_o) == th_o,\
+                f'Resource `{r}` was used out of order! -- {th_o}'
+
+    def run(self):
+        tests = [i for i in dir(self) if i.startswith('test_')]
+        self.tests = len(tests)
+        for i, t in enumerate(tests):
+            self._run_single_test(i, t)
+        self._summarize_results()
 
 
+    def _run_single_test(self, i, t):
+        printed_output = io.StringIO()
+        name = t[5:].replace('_', ' ')
+        print(f'{f"     {i+1} of {self.tests} | Testing {name}    ":-^80s}')
+        try:
+            with redirect_stdout(printed_output):
+                expected_output = getattr(self, t)()
+            if expected_output is not None:
+                o = printed_output.getvalue()
+                assert expected_output == o, \
+                    f'\n Returned result:\n'\
+                    f'    `{repr(o)}`\n'\
+                    f' Did not match expected output:\n'\
+                    f'     "{repr(expected_output)}"\n'
+        except Exception as e:
+            print('v'*80)
+            print(traceback.format_exc().strip('\n'))
+            print('^'*80)
+        else:
+            self.passed += 1
+            if printed_output.getvalue():
+                for l in printed_output.getvalue().strip('\n').split('\n'):
+                    print(f'   {l}')
+            print(f'{f"> Success <":-^80s}')
 
+    def _summarize_results(self):
+        fill = '#' if self.passed == self.tests else '!'
+        print(f'{fill}'*80)
+        message = f"Completed Tests -- passed {self.passed} of {self.tests}"
+        if fill == "#":
+            print(f'{f"  {message}  ":#^80s}')
+        else:
+            print(f'{f"  {message}  ":!^80s}')
+        print(f'{fill}'*80)
+
+
+    def time_it(self, n_loops, func, args=None, kwargs=None, fail=True,
+                timeout_us=None, name=None):
+        import time
+        start = time.perf_counter()
+        if args is None:
+            args = ()
+        if kwargs is None:
+            kwargs = {}
+        for i in range(n_loops):
+            try:
+                func(*args, **kwargs)
+            except Exception as e:
+                if fail:
+                    raise e
+                else:
+                    pass
+        end = time.perf_counter()
+        time_per_loop_us = ((end-start) / n_loops)*1e6
+        if timeout_us is not None:
+            if time_per_loop_us > timeout_us:
+                name = func.__name__ if name is None else name
+                raise TimeoutError(
+                    f'Timed out on {name}\n'
+                    f'   args:{args}\n'
+                    f'   kwargs: {kwargs}\n'
+                    f' Each loop took {time_per_loop_us:.2f} \u03BCs'
+                    f' (Allowed: {timeout_us:.2f} \u03BCs)')
+        return time_per_loop_us
+
+### TODO: Remove these if I can....
+class DummyCamera:
+    def record(self, a):
+        import time
+        time.sleep(.05)
+        return a
+
+class DummyProcessor:
+    def process(self, a):
+        import time
+        time.sleep(.2)
+        return a
+
+class DummyGUI:
+    def display(self, a):
+        import time
+        time.sleep(.002)
+        return a
+
+class DummyFileSaver:
+    def save(self, a):
+        import time
+        time.sleep(.3)
+        return a
 
 
 if __name__ == '__main__':
-    main()
+    Tests().run()
 
