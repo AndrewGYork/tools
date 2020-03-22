@@ -447,9 +447,10 @@ class Tests():
 
     def _trial_slicing_of_shared_array(self, pm):
         ri = np.random.randint # Just to get short lines
-        dtype = np.uint8 # TODO, choose a random choice
+        dtype = np.dtype(np.random.choice(
+            [np.uint16, np.uint8, float, np.float32, np.float64]))
         original_dimensions = tuple(
-            ri(2, 100) for d in range(ri(1, 5)))
+            ri(2, 100) for d in range(ri(2, 5)))
         slicer = tuple(
             slice(
                 ri(0, a//2),
@@ -463,7 +464,8 @@ class Tests():
         b.fill(1)
         expected_total = int(b.sum())
         reloaded_total = b._disconnect()._reconnect(pm.shared_mp_arrays).sum()
-        assert expected_total == reloaded_total
+        assert expected_total == reloaded_total, \
+            f'Failed {dtype.name}/{original_dimensions}/{slicer}'
 
     def test_passing_normal_numpy_array(self):
         shape = (10, 10)
