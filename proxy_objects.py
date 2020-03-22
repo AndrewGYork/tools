@@ -282,6 +282,7 @@ def _dummy_function():
 class DummyClass:
     pass
 
+
 class FIFOLock:
     """Like threading.Lock, but releases first-in/first-out to blocking threads.
 
@@ -352,6 +353,7 @@ class FIFOLock:
     def __exit__(self, exc_type, exc_val, exc_tb):
         return self.release()
 
+
 # When an exception from the child process isn't handled by the parent
 # process, we'd like the parent to print the child traceback. Overriding
 # sys.excepthook seems to be the standard way to do this:
@@ -380,8 +382,6 @@ if mp.get_start_method(allow_none=True) != 'spawn':
 
 
 # Testing block.
-
-
 class Tests():
     '''
     Method names that start with `test_` will be run.
@@ -522,17 +522,17 @@ class Tests():
         a = ProxyObject(Tests.TestClass, 'attribute', x=4,)
         t = self.time_it(
             n_loops, a.test_method, timeout_us=100, name='a.test_method')
-        print(f" {t:.2f} \u03BCs per trivial method call - {n_loops} loops")
+        print(f" {t:.2f} \u03BCs per trivial method call.")
         t = self.time_it(
             n_loops, lambda: a.x, timeout_us=100, name='a.x')
-        print(f" {t:.2f} \u03BCs per get-attribute - {n_loops} loops")
+        print(f" {t:.2f} \u03BCs per get-attribute.")
         a.x = 4 ## test set attribute with normal syntax
         t = self.time_it(n_loops, lambda: setattr(a, 'x', 5),
                          timeout_us=100, name='setattr(a, "x", 5)')
-        print(f" {t:.2f} \u03BCs per set-attribute. - {n_loops} loops")
+        print(f" {t:.2f} \u03BCs per set-attribute.")
         t = self.time_it(n_loops, lambda: a.z, fail=False, timeout_us=100,
                          name='a.z (raises AttributeError)')
-        print(f" {t:.2f} \u03BCs per parent-handled exception. - {n_loops} loops")
+        print(f" {t:.2f} \u03BCs per parent-handled exception.")
         self._test_passing_array_performance()
 
     def _test_passing_array_performance(self):
