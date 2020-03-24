@@ -119,7 +119,7 @@ class ProxyObject:
         self._.child_pipe = child_pipe
         self._.child_process = child_process
         self._.shared_mp_arrays = shared_mp_arrays
-        self._.fifo_lock = FIFOLock()
+        self._.lock = LockWithWaitingList()
         # Make sure the child process initialized successfully:
         self._.child_process.start()
         assert _get_response(self) == 'Successfully initialized'
@@ -149,10 +149,10 @@ class ProxyObject:
         return _get_response(self)
 
     def __enter__(self):
-        return self._.fifo_lock.acquire()
+        return self._.lock
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        return self._.fifo_lock.release()
+        pass
 
 def _get_response(proxy_object):
     """Effectively a method of ProxyObject, but defined externally to
@@ -222,75 +222,56 @@ def _dummy_function():
 class _DummyClass:
     pass
 
-class FIFOLock:
-    """Like threading.Lock, but releases first-in, first-out.
-
-    From the guy who made timsort! https://stackoverflow.com/a/19695878
-
-    Suppose you have several shared resources that each proceed at their
-    own speed (for example, camera, processing, gui, disk), and
-    several threads executing a task like:
-
-    def snap():
-        raw_image = camera.record()
-        image = processing(raw_image)
-        gui.display(image)
-        disk.save(raw_image)
-
-    We want each thread to proceed at top speed, but we also want each
-    thread to wait its turn before accessing a one-at-a-time shared
-    resource:
-
-    def snap():
-        with camera_lock:
-            raw_image = camera.record()
-        with processing_lock:
-            image = processing(raw_image)
-        with display_lock:
-            gui.display(image)
-        disk.save(raw_image)
-
-    Suppose the camera was much faster than processing, and we launch
-    several snap() threads at once; we could easily end up with multiple
-    snap() threads blocking on processing simultaneously. If our locks
-    were instances of threading.Lock, image 3 will sometimes be
-    processed and displayed before image 2. This is bad! If we use a
-    FIFOLock instead, images will display in the same order that the
-    camera records them. This is good.
-    """
+class LockWithWaitingList:
     def __init__(self):
-        self.lock = threading.Lock() # A lock for your lock!
-        self.waiters = [] # a collections.deque would be faster...
-        self.count = 0
-
-    def acquire(self):
-        with self.lock:
-            if self.count > 0: # Someone else has custody, get in line
-                new_lock = threading.Lock()
-                new_lock.acquire()
-                self.waiters.append(new_lock)
-                self.lock.release()
-                new_lock.acquire() # Block here until another thread releases
-                self.lock.acquire()
-            self.count += 1
-        return True
-
-    def release(self):
-        with self.lock:
-            if not self.locked():
-                raise RuntimeError("Can't release a lock that isn't locked")
-            self.count -= 1
-            if len(self.waiters) > 0:
-                self.waiters.pop(0).release() # Call the next-in-line
-
-    def locked(self):
-        return self.count > 0
+        self.lock = threading.Lock()
+        self.waiting_list = [] # Switch to a queue/deque if speed really matters
 
     def __enter__(self):
-        return self.acquire()
+        self.lock.acquire()
+        return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        return self.release()
+        self.lock.release()
+
+threading_lock_type = type(threading.Lock())
+
+def launch(first_lock, target, args):
+    """A very thin wrapper around threading.Thread()
+
+    The 'target' function must accept a 'permission slip' (an instance
+    of threading.Lock) as its first argument, which will be used when
+    you call 'wait_in_line'.
+    """
+    assert isinstance(first_lock, LockWithWaitingList)
+    permission_slip = threading.Lock()
+    permission_slip.acquire()
+    with first_lock:
+        first_lock.waiting_list.append(permission_slip)
+    thread = threading.Thread(target=target, args=(permission_slip,) + args)
+    thread.start()
+    return thread
+
+def wait_in_line(lock, permission_slip):
+    assert isinstance(lock, LockWithWaitingList)
+    assert isinstance(permission_slip, threading_lock_type)
+    # Wait for your number to be called
+    if permission_slip is lock.waiting_list[0] and permission_slip.locked():
+        permission_slip.release() # We arrived to an empty waiting list; unlock
+    permission_slip.acquire() # If there's someone ahead of us, this blocks
+    return None
+
+def switch(a, b=None):
+    assert isinstance(a, LockWithWaitingList)
+    if b is not None:
+        assert isinstance(b, LockWithWaitingList)
+        with b: # Put our permission slip in line for the next lock
+            b.waiting_list.append(a.waiting_list[0])
+    with a:
+        a.waiting_list.pop(0) # Remove ourselves from the current line
+        if len(a.waiting_list) > 0: # If anyone else is waiting...
+            a.waiting_list[0].release() # ...wake up the new first-in-line
+
 
 class _SharedNumpyArray(np.ndarray):
     """A numpy array that lives in shared memory
@@ -303,7 +284,7 @@ class _SharedNumpyArray(np.ndarray):
     in-memory objects we regularly deal with are numpy arrays, so it
     makes sense to provide a way to pass large numpy arrays to and from
     proxied objects via shared memory (which avoids slow serialization).
-    
+
     There's a straightforward recipe to do this: declare an mp.Array in
     the parent process, pass it to the initializer of the child process,
     and view it as a numpy array with np.frombuffer in both parent and
@@ -326,7 +307,7 @@ class _SharedNumpyArray(np.ndarray):
         display.show(display_buf)
 
     ...but instead you write code that looks like this:
-    
+
         pm = ProxyManager(shared_memory_sizes=(400*2000*2000*2, 2000*2000))
         data_buf = pm.shared_numpy_array(0, (400, 2000, 2000), dtype=np.uint16)
         display_buf = pm.shared_numpy_array(1, (2000, 2000), dtype=np.uint8)
@@ -583,21 +564,22 @@ class _Tests():
         assert a.x == 4
         assert getattr(a, 'x') == 4
 
-    def test_overhead(self):
+    def test_proxy_object_overhead(self):
+        print('Performace summary:')
         n_loops = 10000
         a = ProxyObject(_Tests.TestClass, 'attribute', x=4,)
         t = self.time_it(
-            n_loops, a.test_method, timeout_us=100, name='a.test_method')
+            n_loops, a.test_method, timeout_us=100, name='Trivial method call')
         print(f" {t:.2f} \u03BCs per trivial method call.")
         t = self.time_it(
-            n_loops, lambda: a.x, timeout_us=100, name='a.x')
+            n_loops, lambda: a.x, timeout_us=100, name='Attribute access')
         print(f" {t:.2f} \u03BCs per get-attribute.")
         a.x = 4 ## test set attribute with normal syntax
         t = self.time_it(n_loops, lambda: setattr(a, 'x', 5),
-                         timeout_us=100, name='setattr(a, "x", 5)')
+                         timeout_us=100, name='Attribute setting')
         print(f" {t:.2f} \u03BCs per set-attribute.")
         t = self.time_it(n_loops, lambda: a.z, fail=False, timeout_us=100,
-                         name='a.z (raises AttributeError)')
+                         name='Attribute error')
         print(f" {t:.2f} \u03BCs per parent-handled exception.")
         self._test_passing_array_performance()
 
@@ -613,9 +595,10 @@ class _Tests():
 
     def _test_array_passing(self, pass_by, method_name, shape, dtype, n_loops):
         dtype = np.dtype(dtype)
-        name = f'{pass_by} -- {method_name} -- {dtype.name}-{shape}'
         sz = int(np.prod(shape)*np.dtype(int).itemsize)
         pm = ProxyManager((sz, sz))
+        direction = '<->' if method_name == 'test_modify_array' else '->'
+        name = f'{shape} array {direction} {pass_by}'
         object_with_shared_memory = pm.proxy_object(_Tests.TestClass)
         if pass_by == 'reference':
             a = pm.shared_numpy_array(0, shape, dtype=dtype)
@@ -628,88 +611,145 @@ class _Tests():
                                   name=name)
         print(f' {t_per_loop:.2f} \u03BCs per {name}')
 
-    def test_FIFO(self):
+    def test_lock_with_waitlist(self):
         import time
-        camera_queue = FIFOLock()
-        processing_queue = FIFOLock()
-        display_queue = FIFOLock()
-        disk_queue = FIFOLock()
-        acq_order = {'camera': [],
-                     'processing': [],
-                     'display': [],
-                     'disk': []}
-        def use_resource(thread_id):
-            for resource, name, duration in (
-                (camera_queue, 'camera', 0.05),
-                (processing_queue, 'processing', 0.2),
-                (display_queue, 'display', 0.05),
-                (disk_queue, 'disk', 0.3)
-                ):
-                print("Thread %i waiting in line for %s"%(thread_id, name))
-                with resource:
-                    print("Thread %i acquired %s"%(thread_id, name))
-                    acq_order[name].append(thread_id)
-                    time.sleep(duration)
-                print("Thread %i released %s"%(thread_id, name))
+        try:
+            from tqdm import tqdm
+        except ImportError:
+            tqdm = None ## No progress bars :(
+
+        camera_lock = LockWithWaitingList()
+        display_lock = LockWithWaitingList()
+
+        def snap(permission_slip, i):
+            if not tqdm is None: pbars['camera'].update(1)
+            if not tqdm is None: pbars['camera'].refresh()
+            # We're already in line for the camera; wait until you're first in line
+            wait_in_line(camera_lock, permission_slip)
+            # Use the resource
+            time.sleep(0.02)
+            order['camera'].append(i)
+            if not tqdm is None: pbars['camera'].update(-1)
+            if not tqdm is None: pbars['camera'].refresh()
+            # Move to the next resource and wait for your number to be called
+            switch(camera_lock, display_lock)
+            if not tqdm is None: pbars['display'].update(1)
+            if not tqdm is None: pbars['display'].refresh()
+            wait_in_line(display_lock, permission_slip)
+            # Use the resource
+            time.sleep(0.05)
+            order['display'].append(i)
+            # Move to the next resource
+            switch(display_lock, None)
+            if not tqdm is None: pbars['display'].update(-1)
+            if not tqdm is None: pbars['display'].refresh()
+            return None
+
+        num_snaps = 100
+        order = {'camera': [], 'display': []}
+        if not tqdm is None:
+            f = '{desc: <30}{n: 3d}-{bar:45}|'
+            pbars = {n: tqdm(total=num_snaps, unit='th',
+                             bar_format=f, desc=f'Threads waiting on {n}')
+                     for n in order.keys()}
         threads = []
-        n_threads = 4
-        for i in range(n_threads):
-            threads.append(threading.Thread(target=use_resource, args=(i,)))
-            threads[-1].start()
+        for i in range(num_snaps):
+            threads.append(launch(camera_lock, target=snap, args=(i,)))
         for th in threads:
             th.join()
-        print("Acquisition order:")
-        for k, v in acq_order.items():
-            print(' ', (k + ':').ljust(12), v, sep='')
-            assert v == list(range(n_threads))
 
-    def test_proxy_fifo_lock(self):
+        if not tqdm is None:
+            for pb in pbars.values(): pb.close()
+
+        assert order['camera'] == list(range(num_snaps))
+        assert order['display'] == list(range(num_snaps))
+
+
+    def test_proxy_with_lock_with_waitlist(self):
         import time
-
+        try:
+            from tqdm import tqdm
+        except ImportError:
+            tqdm = None ## No progress bars :(
         # Create proxy objects of resources to use.
         # Each has a method that sleep for some ammount of time and
         # returns `True`.
-        cam = ProxyObject(_DummyCamera)
-        proc = ProxyObject(_DummyProcessor)
-        gui = ProxyObject(_DummyGUI)
-        fout = ProxyObject(_DummyFileSaver)
+        camera = ProxyObject(_DummyCamera)
+        processor = ProxyObject(_DummyProcessor)
+        display = ProxyObject(_DummyGUI)
+        disk = ProxyObject(_DummyFileSaver)
 
-        threads = []
-        num_threads = 10 # Number of threads to start
+        def snap(permission_slip, i):
+            # This is messy becuase to the progress bars and recording order
+            # for the test. You only need the lines that make calls to each
+            #resource, `wait_in_line`, and `switch`.
+            with camera as camera_lock, \
+                     processor as processor_lock, \
+                     display as display_lock, \
+                     disk as disk_lock:
+                if not tqdm is None: pbars['camera'].update(1)
+                if not tqdm is None: pbars['camera'].refresh()
+                wait_in_line(camera_lock, permission_slip)
+                # Use the resource
+                a = camera.record(i)
+                results[i].append(a)
+                acq_order['camera'].append(i)
+                if not tqdm is None: pbars['camera'].update(-1)
+                if not tqdm is None: pbars['camera'].refresh()
+                # Move to the next resource and wait for your number to be called
+                switch(camera_lock, processor_lock)
+                if not tqdm is None: pbars['processor'].update(1)
+                pbars['processor'].refresh()
+                wait_in_line(processor_lock, permission_slip)
+                # Use the resource
+                acq_order['processor'].append(i)
+                a = processor.process(i)
+                results[i].append(a)
+                if not tqdm is None: pbars['processor'].update(-1)
+                if not tqdm is None: pbars['processor'].refresh()
+                switch(processor_lock, display_lock)
+                if not tqdm is None: pbars['display'].update(1)
+                if not tqdm is None: pbars['display'].refresh()
+                wait_in_line(display_lock, permission_slip)
+                acq_order['display'].append(i)
+                a = display.display(i)
+                results[i].append(i)
+                if not tqdm is None: pbars['display'].update(-1)
+                if not tqdm is None: pbars['display'].refresh()
+                switch(display_lock, disk_lock)
+                if not tqdm is None: pbars['disk'].update(1)
+                if not tqdm is None: pbars['disk'].refresh()
+                wait_in_line(disk_lock, permission_slip)
+                if not tqdm is None: acq_order['disk'].append(i)
+                a = disk.save(i)
+                results[i].append(i)
+                if not tqdm is None: pbars['disk'].update(-1)
+                if not tqdm is None: pbars['disk'].refresh()
+                switch(disk_lock, None)
 
+        NUM_STEPS = 4 # matches the number of steps for check results.
+        num_snaps = 30  # Number of threads to start
         # Create container to hold results
-        results = [[] for i in range(num_threads)]
+        results = [[] for i in range(num_snaps)]
+        threads = []
         acq_order = {'camera': [],
-                     'processing': [],
+                     'processor': [],
                      'display': [],
                      'disk': []}
 
-        def acquisition(thread_id, r):
-            with cam as locked:
-                r.append(cam.record(thread_id))
-                acq_order['camera'].append(thread_id)
-            with proc as locked:
-                r.append(proc.process(thread_id))
-                acq_order['processing'].append(thread_id)
-            with gui as locked:
-                r.append(gui.display(thread_id))
-                acq_order['display'].append(thread_id)
-            with fout as locked:
-                r.append(fout.save(thread_id))
-                acq_order['disk'].append(thread_id)
+        if not tqdm is None:
+            f = '{desc: <30}{n: 3d}-{bar:45}|'
+            pbars = {n: tqdm(total=num_snaps, unit='th',
+                              bar_format=f, desc=f'Threads waiting on {n}')
+                     for n in acq_order.keys()}
 
-        NUM_STEPS = 4 # matches the number of steps for check results.
-
-        for i in range(num_threads):
-            threads.append(
-                threading.Thread(
-                    target=acquisition,
-                    args=(i, results[i])))
-            threads[-1].start()
-
-        # Wait for threads
+        for i in range(num_snaps):
+            threads.append(launch(camera._.lock, target=snap, args=(i,)))
         for th in threads:
             th.join()
+
+        if not tqdm is None:
+            for pb in pbars.values(): pb.close()
 
         # Check results
         for i, a in enumerate(results):
@@ -765,12 +805,21 @@ class _Tests():
     def time_it(self, n_loops, func, args=None, kwargs=None, fail=True,
                 timeout_us=None, name=None):
         import time
+        try:
+            from tqdm import tqdm
+        except ImportError:
+            tqdm = None ## No progress bars :(
+
         start = time.perf_counter()
         if args is None:
             args = ()
         if kwargs is None:
             kwargs = {}
+        if not tqdm is None:
+            f = '{desc: <38}{n: 7d}-{bar:17}|[{rate_fmt}]'
+            pb = tqdm(total=n_loops, desc=name, bar_format=f)
         for i in range(n_loops):
+            pb.update(1)
             try:
                 func(*args, **kwargs)
             except Exception as e:
@@ -778,8 +827,10 @@ class _Tests():
                     raise e
                 else:
                     pass
+        if not tqdm is None: pb.close()
         end = time.perf_counter()
         time_per_loop_us = ((end-start) / n_loops)*1e6
+
         if timeout_us is not None:
             if time_per_loop_us > timeout_us:
                 name = func.__name__ if name is None else name
