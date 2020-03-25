@@ -184,13 +184,15 @@ class ProxyObject:
         # object's namespace as possible:
         super().__setattr__('_', _DummyClass()) # Weird, but for a reason.
         self._.parent_pipe = parent_pipe
+        self._.parent_pipe_lock = ProxyObjectPipeLock()
         self._.child_pipe = child_pipe
         self._.child_process = child_process
         self._.shared_mp_arrays = shared_mp_arrays
-        self._.lock = LockWithWaitingList()
+        self._.waiting_list = WaitingList()
         # Make sure the child process initialized successfully:
-        self._.child_process.start()
-        assert _get_response(self) == 'Successfully initialized'
+        with self._.parent_pipe_lock:
+            self._.child_process.start()
+            assert _get_response(self) == 'Successfully initialized'
         # Try to ensure the child process closes when we exit:
         atexit.register(lambda: _close(self))
         signal.signal(signal.SIGTERM, lambda s, f: _close(self))
@@ -203,24 +205,22 @@ class ProxyObject:
         possible, even though they actually involve asking the child
         process over a pipe.
         """
-        self._.parent_pipe.send(('__getattribute__', (name,), {}))
-        attr = _get_response(self)
+        with self._.parent_pipe_lock:
+            self._.parent_pipe.send(('__getattribute__', (name,), {}))
+            attr = _get_response(self)
         if callable(attr):
             def attr(*args, **kwargs):
                 args, kwargs = _disconnect_shared_arrays(args, kwargs)
-                self._.parent_pipe.send((name, args, kwargs))
-                return _get_response(self)
+                with self._.parent_pipe_lock:
+                    self._.parent_pipe.send((name, args, kwargs))
+                    return _get_response(self)
         return attr
 
     def __setattr__(self, name, value):
-        self._.parent_pipe.send(('__setattr__', (name, value), {}))
-        return _get_response(self)
+        with self._.parent_pipe_lock:
+            self._.parent_pipe.send(('__setattr__', (name, value), {}))
+            return _get_response(self)
 
-    def __enter__(self):
-        return self._.lock
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        pass
 
 def _get_response(proxy_object):
     """Effectively a method of ProxyObject, but defined externally to
@@ -239,8 +239,9 @@ def _close(proxy_object):
     minimize shadowing of the proxied object's namespace"""
     if not proxy_object._.child_process.is_alive():
         return
-    proxy_object._.parent_pipe.send(None)
-    proxy_object._.child_process.join()
+    with proxy_object._.parent_pipe_lock:
+        proxy_object._.parent_pipe.send(None)
+        proxy_object._.child_process.join()
 
 def _child_loop(initializer, args, kwargs, child_pipe, shared_arrays):
     """The event loop of a ProxyObject's child process
@@ -290,10 +291,10 @@ class _DummyClass:
 def _dummy_function():
     return None
 
-class LockWithWaitingList:
+class WaitingList:
     """For synchronization of one-thread-at-a-time shared resources
 
-    Each ProxyObject has a LockWithWaitingList; if you want to define
+    Each ProxyObject has a WaitingList; if you want to define
     your own objects that can interact with _Custody.switch_from() and
     _Custody._wait_for(), make sure they have a waiting_list = []
     attribute, and a waiting_list_lock = threading.Lock() attribute.
@@ -309,19 +310,37 @@ class LockWithWaitingList:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.waiting_list_lock.release()
 
+class ProxyObjectPipeLock:
+    '''Raises an educational exception (rather than blocking) when you try
+       to acquire a locked lock.'''
+    def __init__(self):
+        self.lock = threading.Lock()
+
+    def __enter__(self):
+        if not self.lock.acquire(blocking=False):
+            raise RuntimeError('''
+                Two different threads tried to use the same ProxyObject at the
+                same time! This is bad. Look at the docstring of
+                proxy_objects.py to see an example of how to use a Custody
+                object to avoid this problem.''')
+        return self.lock
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.lock.release()
+
 threading_lock_type = type(threading.Lock()) # Used for typechecking
 
 def _get_list_and_lock(resource):
     """Convenience function.
 
-    Expected input: A ProxyObject, a LockWithWaitingList, or a
-    LockWithWaitingList-like object with 'waiting_list' and
+    Expected input: A ProxyObject, a WaitingList, or a
+    WaitingList-like object with 'waiting_list' and
     'waiting_list_lock' attributes.
     """
     if isinstance(resource, ProxyObject):
-        waiting_list = resource._.lock.waiting_list
-        waiting_list_lock = resource._.lock.waiting_list_lock
-    else: # Either a LockWithWaitingList, or a good enough impression
+        waiting_list = resource._.waiting_list.waiting_list
+        waiting_list_lock = resource._.waiting_list.waiting_list_lock
+    else: # Either a WaitingList, or a good enough impression
         waiting_list = resource.waiting_list
         waiting_list_lock = resource.waiting_list_lock
     assert isinstance(waiting_list_lock, threading_lock_type)
@@ -338,8 +357,8 @@ def launch_thread(target, first_resource=None, args=(), kwargs={}):
     instance of _Custody()), which will be used to call
     'custody.switch_from()' (and 'custody._wait_for()').
 
-    'first_resource' is an instance of ProxyObject, LockWithWaitingList,
-    or a LockWithWaitingList-like object. The 'target' function is
+    'first_resource' is an instance of ProxyObject, WaitingList,
+    or a WaitingList-like object. The 'target' function is
     expected to call custody.switch_from(None, first_resource) almost
     immediately (waiting in line until the shared resource is available).
     """
@@ -732,31 +751,29 @@ class _Tests():
         try:
             from tqdm import tqdm
         except ImportError:
-            tqdm = None ## No progress bars :(
+            tqdm = None # No progress bars :(
 
-        camera_lock = LockWithWaitingList()
-        display_lock = LockWithWaitingList()
+        camera_lock = WaitingList()
+        display_lock = WaitingList()
 
-        def snap(permission_slip, i):
+        def snap(i, custody):
             if not tqdm is None: pbars['camera'].update(1)
             if not tqdm is None: pbars['camera'].refresh()
             # We're already in line for the camera; wait until you're first in line
-            wait_for(camera_lock, permission_slip)
+            custody.switch_from(None, camera_lock)
             # Use the resource
             time.sleep(0.02)
             order['camera'].append(i)
             if not tqdm is None: pbars['camera'].update(-1)
-            if not tqdm is None: pbars['camera'].refresh()
-            # Move to the next resource and wait for your number to be called
-            switch_from(camera_lock, to=display_lock)
             if not tqdm is None: pbars['display'].update(1)
+            if not tqdm is None: pbars['camera'].refresh()
             if not tqdm is None: pbars['display'].refresh()
-            wait_for(display_lock, permission_slip)
+            custody.switch_from(camera_lock, display_lock)
             # Use the resource
             time.sleep(0.05)
             order['display'].append(i)
             # Move to the next resource
-            switch_from(display_lock, to=None)
+            custody.switch_from(display_lock, None)
             if not tqdm is None: pbars['display'].update(-1)
             if not tqdm is None: pbars['display'].refresh()
             return None
@@ -770,7 +787,7 @@ class _Tests():
                      for n in order.keys()}
         threads = []
         for i in range(num_snaps):
-            threads.append(launch(camera_lock, target=snap, args=(i,)))
+            threads.append(launch_thread(snap, camera_lock, args=(i,)))
         for th in threads:
             th.join()
 
@@ -780,6 +797,23 @@ class _Tests():
         assert order['camera'] == list(range(num_snaps))
         assert order['display'] == list(range(num_snaps))
 
+    def test_incorrect_thread_management(self):
+
+        p = ProxyObject(_Tests.TestClass)
+        p.x = 5
+        exceptions = [1]
+        def t():
+            try:
+                p.x
+            except RuntimeError: ## Should raise this
+                pass
+            else:
+                exceptions.append(1)
+        for i in range(100):
+            threading.Thread(target=t).start()
+        if sum(exceptions) == 0:
+            raise UserWarning('No exceptions raised.'
+                              'Expected some RuntimeErrors')
 
     def test_proxy_with_lock_with_waitlist(self):
         import time
@@ -787,80 +821,52 @@ class _Tests():
             from tqdm import tqdm
         except ImportError:
             tqdm = None ## No progress bars :(
-        # Create proxy objects of resources to use.
-        # Each has a method that sleep for some ammount of time and
-        # returns `True`.
-        camera = ProxyObject(_DummyCamera)
-        processor = ProxyObject(_DummyProcessor)
-        display = ProxyObject(_DummyGUI)
-        disk = ProxyObject(_DummyFileSaver)
 
-        def snap(permission_slip, i):
-            # This is messy because to the progress bars and recording
-            # order for the test. You only need the lines that make
-            # calls to each resource, `wait_for`, and `switch_from`.
-            with camera as camera_lock, \
-                     processor as processor_lock, \
-                     display as display_lock, \
-                     disk as disk_lock:
-                if not tqdm is None: pbars['camera'].update(1)
-                if not tqdm is None: pbars['camera'].refresh()
-                wait_for(camera_lock, permission_slip)
-                # Use the resource
-                a = camera.record(i)
+        def snap(i, custody):
+            prev_res = None
+            itr = enumerate(zip(resources, res_names, funcs))
+            for ri, (res, name, resource_funcs) in itr:
+                if not tqdm is None:
+                    pbars[name].update(1) # Be careful to access the resource
+                    pbars[name].refresh() # before you have control of it.
+                custody.switch_from(prev_res, res)
+                for fname in resource_funcs:
+                    a = getattr(res, fname)(i)
                 results[i].append(a)
-                acq_order['camera'].append(i)
-                if not tqdm is None: pbars['camera'].update(-1)
-                if not tqdm is None: pbars['camera'].refresh()
-                # Move to the next resource and wait for your number to be called
-                switch_from(camera_lock, to=processor_lock)
-                if not tqdm is None: pbars['processor'].update(1)
-                pbars['processor'].refresh()
-                wait_for(processor_lock, permission_slip)
-                # Use the resource
-                acq_order['processor'].append(i)
-                a = processor.process(i)
-                results[i].append(a)
-                if not tqdm is None: pbars['processor'].update(-1)
-                if not tqdm is None: pbars['processor'].refresh()
-                switch_from(processor_lock, to=display_lock)
-                if not tqdm is None: pbars['display'].update(1)
-                if not tqdm is None: pbars['display'].refresh()
-                wait_for(display_lock, permission_slip)
-                acq_order['display'].append(i)
-                a = display.display(i)
-                results[i].append(i)
-                if not tqdm is None: pbars['display'].update(-1)
-                if not tqdm is None: pbars['display'].refresh()
-                switch_from(display_lock, to=disk_lock)
-                if not tqdm is None: pbars['disk'].update(1)
-                if not tqdm is None: pbars['disk'].refresh()
-                wait_for(disk_lock, permission_slip)
-                if not tqdm is None: acq_order['disk'].append(i)
-                a = disk.save(i)
-                results[i].append(i)
-                if not tqdm is None: pbars['disk'].update(-1)
-                if not tqdm is None: pbars['disk'].refresh()
-                switch_from(disk_lock, to=None)
+                acq_order[res.name].append(i)
+                if not tqdm is None:
+                    pbars[res.name].update(-1)
+                    pbars[res.name].refresh()
+                prev_res = res
+            custody.switch_from(res, None)
 
         NUM_STEPS = 4 # matches the number of steps for check results.
         num_snaps = 30  # Number of threads to start
-        # Create container to hold results
-        results = [[] for i in range(num_snaps)]
-        threads = []
-        acq_order = {'camera': [],
-                     'processor': [],
-                     'display': [],
-                     'disk': []}
 
+        # Create proxy objects of resources to use.
+        # Each has a method that sleep for some ammount of time and
+        # returns `True`.
+        camera = ProxyObject(_DummyCamera, name='camera')
+        processor = ProxyObject(_DummyProcessor, name='processor')
+        display = ProxyObject(_DummyGUI, name='display')
+        disk = ProxyObject(_DummyFileSaver, name='disk')
+        resources = [camera, processor, display, disk]
+        res_names = [str(r.name) for r in resources]
+        acq_order = {r.name:[] for r in resources}
+        results = [[] for i in range(num_snaps)]
+        funcs = [('record',), # methods to call for camera
+                 ('process', ), # methods to call for processor
+                 ('display', ), # methods to call for display
+                 ('save', ) # methods to call for for disk.
+            ]
         if not tqdm is None:
             f = '{desc: <30}{n: 3d}-{bar:45}|'
             pbars = {n: tqdm(total=num_snaps, unit='th',
                               bar_format=f, desc=f'Threads waiting on {n}')
                      for n in acq_order.keys()}
-
+        threads = []
         for i in range(num_snaps):
-            threads.append(launch(camera._.lock, target=snap, args=(i,)))
+            threads.append(launch_thread(snap, camera, args=(i,)))
         for th in threads:
             th.join()
 
@@ -874,8 +880,8 @@ class _Tests():
             assert sorted(th_o) == th_o,\
                 f'Resource `{r}` was used out of order! -- {th_o}'
 
-    def run(self):
-        tests = [i for i in dir(self) if i.startswith('test_')]
+    def run(self, test_prefix='test_'):
+        tests = [i for i in dir(self) if i.startswith(test_prefix)]
         self.tests = len(tests)
         for i, t in enumerate(tests):
             self._run_single_test(i, t)
@@ -959,29 +965,34 @@ class _Tests():
         return time_per_loop_us
 
 ### TODO: Remove these if I can....
-class _DummyCamera:
+class _DummyObject:
+    def __init__(self, name='generic_dummy_obj'):
+        self.name=name
+
+class _DummyCamera(_DummyObject):
     def record(self, a):
         import time
         time.sleep(.05)
         return a
 
-class _DummyProcessor:
+class _DummyProcessor(_DummyObject):
     def process(self, a):
         import time
         time.sleep(.2)
         return a
 
-class _DummyGUI:
+class _DummyGUI(_DummyObject):
     def display(self, a):
         import time
         time.sleep(.002)
         return a
 
-class _DummyFileSaver:
+class _DummyFileSaver(_DummyObject):
     def save(self, a):
         import time
         time.sleep(.3)
         return a
 
 if __name__ == '__main__':
-    _Tests().run()
+    test_prefix = 'test_proxy_with_lock_with_waitlist'
+    _Tests().run('test_')
