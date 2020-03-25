@@ -113,6 +113,7 @@ module, you have to protect the "entry point" of your program. The
 typical way to do this is by using an "if __name__ == '__main__':" block:
 
 import numpy as np
+from proxy_objects import ProxyObject
 from dummy_module import Display
 
 def main():
