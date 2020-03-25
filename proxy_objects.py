@@ -81,7 +81,7 @@ class Camera:
 
 class Preprocessor:
     def process(self, x, out):
-        out[:] = x.max(axis=0)
+        x.max(axis=0, out=out)
 
 class Display:
     def show(self, image):
