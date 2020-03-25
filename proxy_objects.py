@@ -48,7 +48,7 @@ def main():
     display = pm.proxy_object(Display)
 
     def snap(data_buffer, display_buffer, custody):
-        custody.switch_from(None, camera)
+        custody.switch_from(None, to=camera)
         camera.record(out=data_buffer)
 
         custody.switch_from(camera, to=preprocessor)
