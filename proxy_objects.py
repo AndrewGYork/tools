@@ -23,18 +23,77 @@ multiprocessing child process, but this usually leads to high mental
 overhead. Using pipes and queues for calling methods, getting/setting
 attributes, printing, handling exceptions, and cleanup can lean to ugly
 code and confusion. Can we isolate most of this mental overhead to this
-module? If we do it right, we'll be able to write code like:
+module? If we do it right, we'll be able to write fairly sophisticated
+code that's still fairly readable. Note that the following code is
+effectively uncommented; can you still figure out what it's doing?
 
-from camera_module import Camera
-cam = ProxyObject(Camera) # Camera object instance lives in a child process...
-cam.set_fps(10000)        # ...but acts like it's in the parent process!
-cam.set_trigger('external')
-x = cam.record(num_images=10000) # Fast, demanding, performance-critical.
-cam.close()
+                ####################################################
+                #  EXAMPLE CODE (copypaste into 'test.py' and run) #
+                ####################################################
+from proxy_objects import ProxyManager, launch_thread
+from dummy_module import Camera, Preprocessor, Display
 
-...without paying much attention to the fact that the instance of the
-Camera object actually lives in a child process, and communicates over
-pipes.
+def main():
+    pm = ProxyManager(shared_memory_sizes=(10*2000*2000*2, # Two data buffers
+                                           10*2000*2000*2,
+                                            1*2000*2000*1, # Two display buffers
+                                            1*2000*2000*1))
+    data_buffers = [pm.shared_numpy_array(0, (10, 2000, 2000), 'uint16'),
+                    pm.shared_numpy_array(1, (10, 2000, 2000), 'uint16')]
+    display_buffers = [pm.shared_numpy_array(2, (2000, 2000), 'uint8'),
+                       pm.shared_numpy_array(3, (2000, 2000), 'uint8')]
+
+    camera = pm.proxy_object(Camera)
+    preprocessor = pm.proxy_object(Preprocessor)
+    display = pm.proxy_object(Display)
+
+    def snap(data_buffer, display_buffer, custody):
+        custody.switch_from(None, camera)
+        camera.record(out=data_buffer)
+
+        custody.switch_from(camera, to=preprocessor)
+        preprocessor.process(data_buffer, out=display_buffer)
+
+        custody.switch_from(preprocessor, to=display)
+        display.show(display_buffer)
+
+        custody.switch_from(display, to=None)
+
+    for i in range(15):
+        th0 = launch_thread(target=snap, first_resource=camera,
+                            args=(data_buffers[0], display_buffers[0]))
+        if i > 0:
+            th1.join()
+        th1 = launch_thread(target=snap, first_resource=camera,
+                            args=(data_buffers[1], display_buffers[1]))
+        th0.join()
+    th1.join()
+
+if __name__ == '__main__':
+    main()
+            #####################################################
+            #  This code is imported by the example code above. #
+            #       Copypaste it into 'dummy_module.py'         #
+            #####################################################
+class Camera:
+    def record(self, out):
+        out.fill(1)
+
+class Preprocessor:
+    def process(self, x, out):
+        out[:] = x.max(axis=0)
+
+class Display:
+    def show(self, image):
+        pass
+                            ######################
+                            #  END EXAMPLE CODE  #
+                            ######################
+
+Notice how little attention this code is spending on the fact that the
+instances of the Camera, Preprocessing, and Display objects actually
+live in child processes, communicate over pipes, and synchronize access
+to shared memory.
 
 Note that the method calls to our proxied object still block the parent
 process; the idea is, the parent process is now effectively IO-limited
@@ -49,16 +108,17 @@ multiprocessing proxies.
 
 CURRENT LIMITATIONS:
 
-If you use this module, you have to protect the "entry point" of your
-program, like this:
+Like all python code that relies on multiprocessing, if you use this
+module, you have to protect the "entry point" of your program. The
+typical way to do this is by using an "if __name__ == '__main__':" block:
 
-from camera_module import Camera
+import numpy as np
+from dummy_module import Display
+
 def main():
-    cam = ProxyObject(Camera)
-    cam.set_fps(10000)
-    cam.set_trigger('external')
-    x = cam.record(num_images=10000)
-    cam.close()
+    disp = ProxyObject(Display)
+    image = np.random.random((2000 2000))
+    disp.show(image)
 
 if __name__ == '__main__':
     main()
@@ -67,9 +127,9 @@ if __name__ == '__main__':
 class ProxyManager:
     """Allocates shared memory and spawns proxy objects
 
-    If you want your ProxyObjects to share memory with the parent (and
-    each other), allocate a ProxyManager first, and use it to spawn your
-    ProxyObjects.
+    If you want your ProxyObjects to share memory with the parent
+    process (and each other), allocate a ProxyManager first, and use it
+    to spawn your ProxyObjects.
     """
     def __init__(self, shared_memory_sizes=tuple()):
         if np is None:
@@ -98,6 +158,13 @@ class ProxyObject:
         ):
         """Make an object in a child process, that acts like it isn't.
 
+        As much as possible, we try to make instances of ProxyObject
+        behave as if they're an instance of the proxied object living in
+        the parent process. They're not, of course: they live in a child
+        process. If you have spare cores on your machine, this turns
+        CPU-bound operations into IO-bound operations, without too much
+        mental overhead for the coder.
+
         initializer -- callable that returns an instance of a Python object.
         initargs, initkwargs --  Arguments to 'initializer'
         shared_mp_arrays -- Used by a ProxyManager to pass in shared memory.
@@ -110,10 +177,10 @@ class ProxyObject:
                                    name=initializer.__name__,
                                    args=(initializer, initargs, initkwargs,
                                          child_pipe, shared_mp_arrays))
-        # Attribute-setting looks weird because we override __setattr__,
-        # and because we use a dummy object's namespace to hold our
-        # attributes so we shadow as little of the proxied object's
-        # namespace as possible:
+        # Attribute-setting looks weird here because we override
+        # __setattr__, and because we use a dummy object's namespace to
+        # hold our attributes so we shadow as little of the proxied
+        # object's namespace as possible:
         super().__setattr__('_', _DummyClass()) # Weird, but for a reason.
         self._.parent_pipe = parent_pipe
         self._.child_pipe = child_pipe
@@ -213,71 +280,119 @@ def _child_loop(initializer, args, kwargs, child_pipe, shared_arrays):
             e.child_traceback_string = traceback.format_exc()
             child_pipe.send((e, printed_output.getvalue()))
 
+# A minimal class that we use just to get another namespace:
+class _DummyClass:
+    pass
+
 # If we're trying to return a (presumably worthless) "callable" to
 # the parent, it might as well be small and simple:
 def _dummy_function():
     return None
 
-# A minimal class that we use just to get another namespace:
-class _DummyClass:
-    pass
-
 class LockWithWaitingList:
+    """For synchronization of one-thread-at-a-time shared resources
+
+    Each ProxyObject has a LockWithWaitingList; if you want to define
+    your own objects that can interact with _Custody.switch_from() and
+    _Custody._wait_for(), make sure they have a waiting_list = []
+    attribute, and a waiting_list_lock = threading.Lock() attribute.
+    """
     def __init__(self):
-        self.lock = threading.Lock()
         self.waiting_list = [] # Switch to a queue/deque if speed really matters
+        self.waiting_list_lock = threading.Lock()
 
     def __enter__(self):
-        self.lock.acquire()
+        self.waiting_list_lock.acquire()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self.lock.release()
+        self.waiting_list_lock.release()
 
-threading_lock_type = type(threading.Lock())
+threading_lock_type = type(threading.Lock()) # Used for typechecking
 
-def launch(first_lock, target, args):
-    """A very thin wrapper around threading.Thread()
+def _get_list_and_lock(resource):
+    """Convenience function.
 
-    The 'target' function must accept a 'permission slip' (an instance
-    of threading.Lock) as its first argument, which will be used when
-    you call 'wait_in_line'.
+    Expected input: A ProxyObject, a LockWithWaitingList, or a
+    LockWithWaitingList-like object with 'waiting_list' and
+    'waiting_list_lock' attributes.
     """
-    assert isinstance(first_lock, LockWithWaitingList)
-    permission_slip = threading.Lock()
-    permission_slip.acquire()
-    with first_lock:
-        first_lock.waiting_list.append(permission_slip)
-    thread = threading.Thread(target=target, args=(permission_slip,) + args)
+    if isinstance(resource, ProxyObject):
+        waiting_list = resource._.lock.waiting_list
+        waiting_list_lock = resource._.lock.waiting_list_lock
+    else: # Either a LockWithWaitingList, or a good enough impression
+        waiting_list = resource.waiting_list
+        waiting_list_lock = resource.waiting_list_lock
+    assert isinstance(waiting_list_lock, threading_lock_type)
+    return waiting_list, waiting_list_lock
+
+def launch_thread(target, first_resource=None, args=(), kwargs={}):
+    """A thin wrapper around threading.Thread(), useful for ProxyObjects
+
+    Along with ProxyManager (and maybe ProxyObject), this is one of the
+    few definitions from this module you should call directly. See the
+    docstring at the top of this module for an example of usage.
+
+    The 'target' function must accept a 'custody' keyword argument (an
+    instance of _Custody()), which will be used to call
+    'custody.switch_from()' (and 'custody._wait_for()').
+
+    'first_resource' is an instance of ProxyObject, LockWithWaitingList,
+    or a LockWithWaitingList-like object. The 'target' function is
+    expected to call custody.switch_from(None, first_resource) almost
+    immediately (waiting in line until the shared resource is available).
+    """
+    custody = _Custody() # Useful for synchronization in the launched thread
+    if first_resource is not None:
+        custody.switch_from(None, first_resource, wait=False)
+    kwargs['custody'] = custody
+    thread = threading.Thread(target=target, args=args, kwargs=kwargs)
     thread.start()
     return thread
 
-def wait_in_line(lock, permission_slip):
-    assert isinstance(lock, LockWithWaitingList)
-    assert isinstance(permission_slip, threading_lock_type)
-    # Wait for your number to be called
-    if permission_slip is lock.waiting_list[0] and permission_slip.locked():
-        permission_slip.release() # We arrived to an empty waiting list; unlock
-    permission_slip.acquire() # If there's someone ahead of us, this blocks
-    return None
+class _Custody:
+    def __init__(self):
+        """TODO: docstring"""
+        self.permission_slip = threading.Lock()
+        self.permission_slip.acquire()
+        self.first_in_line = False
 
-def switch(a, b=None):
-    assert isinstance(a, LockWithWaitingList)
-    if b is not None:
-        assert isinstance(b, LockWithWaitingList)
-        with b: # Put our permission slip in line for the next lock
-            b.waiting_list.append(a.waiting_list[0])
-    with a:
-        a.waiting_list.pop(0) # Remove ourselves from the current line
-        if len(a.waiting_list) > 0: # If anyone else is waiting...
-            a.waiting_list[0].release() # ...wake up the new first-in-line
+    def switch_from(self, resource, to=None, wait=True):
+        """TODO: docstring"""
+        assert resource is not None or to is not None
+        if to is not None:
+            to_waiting_list, to_waiting_list_lock = _get_list_and_lock(to)
+            with to_waiting_list_lock: # Get in the line for the next lock...
+                if self not in to_waiting_list: # ...unless you're already in it
+                    to_waiting_list.append(self)
+        if resource is not None:
+            waiting_list, waiting_list_lock = _get_list_and_lock(resource)
+            with waiting_list_lock:
+                waiting_list.pop(0) # Remove ourselves from the current line
+                if len(waiting_list) > 0: # If anyone's next...
+                    waiting_list[0].permission_slip.release() # ...wake them up
+            self.first_in_line = False
+        if wait and to is not None:
+            self._wait_for(to)
 
+    def _wait_for(self, resource):
+        """TODO: docstring"""
+        waiting_list, _ = _get_list_and_lock(resource)
+        if self.first_in_line:
+            assert self is waiting_list[0]
+            return
+        # Wait for your number to be called
+        if (self is waiting_list[0] and
+            self.permission_slip.locked()):
+            self.permission_slip.release() # We arrived to an empty waiting list
+        self.permission_slip.acquire() # Blocks if we're not first in line
+        self.first_in_line = True
 
 class _SharedNumpyArray(np.ndarray):
     """A numpy array that lives in shared memory
 
     In general, don't create these directly, create _SharedNumpyArrays
-    (and ProxyObjects) through a ProxyManager.
+    (and ProxyObjects) through an instance of ProxyManager.
 
     Inputs and outputs to/from proxied objects are 'serialized', which
     is pretty fast - except for large in-memory objects. The only large
@@ -625,22 +740,22 @@ class _Tests():
             if not tqdm is None: pbars['camera'].update(1)
             if not tqdm is None: pbars['camera'].refresh()
             # We're already in line for the camera; wait until you're first in line
-            wait_in_line(camera_lock, permission_slip)
+            wait_for(camera_lock, permission_slip)
             # Use the resource
             time.sleep(0.02)
             order['camera'].append(i)
             if not tqdm is None: pbars['camera'].update(-1)
             if not tqdm is None: pbars['camera'].refresh()
             # Move to the next resource and wait for your number to be called
-            switch(camera_lock, display_lock)
+            switch_from(camera_lock, to=display_lock)
             if not tqdm is None: pbars['display'].update(1)
             if not tqdm is None: pbars['display'].refresh()
-            wait_in_line(display_lock, permission_slip)
+            wait_for(display_lock, permission_slip)
             # Use the resource
             time.sleep(0.05)
             order['display'].append(i)
             # Move to the next resource
-            switch(display_lock, None)
+            switch_from(display_lock, to=None)
             if not tqdm is None: pbars['display'].update(-1)
             if not tqdm is None: pbars['display'].refresh()
             return None
@@ -680,16 +795,16 @@ class _Tests():
         disk = ProxyObject(_DummyFileSaver)
 
         def snap(permission_slip, i):
-            # This is messy becuase to the progress bars and recording order
-            # for the test. You only need the lines that make calls to each
-            #resource, `wait_in_line`, and `switch`.
+            # This is messy because to the progress bars and recording
+            # order for the test. You only need the lines that make
+            # calls to each resource, `wait_for`, and `switch_from`.
             with camera as camera_lock, \
                      processor as processor_lock, \
                      display as display_lock, \
                      disk as disk_lock:
                 if not tqdm is None: pbars['camera'].update(1)
                 if not tqdm is None: pbars['camera'].refresh()
-                wait_in_line(camera_lock, permission_slip)
+                wait_for(camera_lock, permission_slip)
                 # Use the resource
                 a = camera.record(i)
                 results[i].append(a)
@@ -697,35 +812,35 @@ class _Tests():
                 if not tqdm is None: pbars['camera'].update(-1)
                 if not tqdm is None: pbars['camera'].refresh()
                 # Move to the next resource and wait for your number to be called
-                switch(camera_lock, processor_lock)
+                switch_from(camera_lock, to=processor_lock)
                 if not tqdm is None: pbars['processor'].update(1)
                 pbars['processor'].refresh()
-                wait_in_line(processor_lock, permission_slip)
+                wait_for(processor_lock, permission_slip)
                 # Use the resource
                 acq_order['processor'].append(i)
                 a = processor.process(i)
                 results[i].append(a)
                 if not tqdm is None: pbars['processor'].update(-1)
                 if not tqdm is None: pbars['processor'].refresh()
-                switch(processor_lock, display_lock)
+                switch_from(processor_lock, to=display_lock)
                 if not tqdm is None: pbars['display'].update(1)
                 if not tqdm is None: pbars['display'].refresh()
-                wait_in_line(display_lock, permission_slip)
+                wait_for(display_lock, permission_slip)
                 acq_order['display'].append(i)
                 a = display.display(i)
                 results[i].append(i)
                 if not tqdm is None: pbars['display'].update(-1)
                 if not tqdm is None: pbars['display'].refresh()
-                switch(display_lock, disk_lock)
+                switch_from(display_lock, to=disk_lock)
                 if not tqdm is None: pbars['disk'].update(1)
                 if not tqdm is None: pbars['disk'].refresh()
-                wait_in_line(disk_lock, permission_slip)
+                wait_for(disk_lock, permission_slip)
                 if not tqdm is None: acq_order['disk'].append(i)
                 a = disk.save(i)
                 results[i].append(i)
                 if not tqdm is None: pbars['disk'].update(-1)
                 if not tqdm is None: pbars['disk'].refresh()
-                switch(disk_lock, None)
+                switch_from(disk_lock, to=None)
 
         NUM_STEPS = 4 # matches the number of steps for check results.
         num_snaps = 30  # Number of threads to start
@@ -869,4 +984,3 @@ class _DummyFileSaver:
 
 if __name__ == '__main__':
     _Tests().run()
-
