@@ -133,18 +133,26 @@ class ProxyManager:
     to spawn your ProxyObjects.
     """
     def __init__(self, shared_memory_sizes=tuple()):
+        """Allocate shared memory as multiprocessing Arrays.
+        """
         if np is None:
             raise ImportError("We failed to import Numpy," +
                               " so there's no point using a ProxyManager.")
-        # Allocate shared memory as multiprocessing Arrays:
         self.shared_mp_arrays = tuple(mp.Array(C.c_uint8, sz)
                                       for sz in shared_memory_sizes)
 
     def proxy_object(self, initializer, *initargs, **initkwargs):
+        """Spawn a ProxyObject that has access to shared memory.
+        """
         return ProxyObject(initializer, *initargs, **initkwargs,
                            shared_mp_arrays=self.shared_mp_arrays)
 
     def shared_numpy_array(self, which_mp_array, shape, dtype=np.uint8):
+        """View some of our shared memory as a numpy array.
+
+        You can pass these shared numpy arrays to and from ProxyObjects
+        without (slow) serialization.
+        """
         assert which_mp_array in range(len(self.shared_mp_arrays))
         return _SharedNumpyArray(arrays=self.shared_mp_arrays, shape=shape,
                                  dtype=dtype, buffer=which_mp_array)
@@ -184,7 +192,7 @@ class ProxyObject:
         # object's namespace as possible:
         super().__setattr__('_', _DummyClass()) # Weird, but for a reason.
         self._.parent_pipe = parent_pipe
-        self._.parent_pipe_lock = ProxyObjectPipeLock()
+        self._.parent_pipe_lock = _ProxyObjectPipeLock()
         self._.child_pipe = child_pipe
         self._.child_process = child_process
         self._.shared_mp_arrays = shared_mp_arrays
@@ -217,10 +225,11 @@ class ProxyObject:
         return attr
 
     def __setattr__(self, name, value):
+        if isinstance(value, _SharedNumpyArray):
+            value = value._disconnect()
         with self._.parent_pipe_lock:
             self._.parent_pipe.send(('__setattr__', (name, value), {}))
             return _get_response(self)
-
 
 def _get_response(proxy_object):
     """Effectively a method of ProxyObject, but defined externally to
@@ -294,10 +303,11 @@ def _dummy_function():
 class WaitingList:
     """For synchronization of one-thread-at-a-time shared resources
 
-    Each ProxyObject has a WaitingList; if you want to define
-    your own objects that can interact with _Custody.switch_from() and
-    _Custody._wait_for(), make sure they have a waiting_list = []
-    attribute, and a waiting_list_lock = threading.Lock() attribute.
+    Each ProxyObject has a WaitingList; if you want to define your own
+    WaitingList-like objects that can interact with
+    _Custody.switch_from() and _Custody._wait_for(), make sure they have
+    a waiting_list = [] attribute, and a waiting_list_lock =
+    threading.Lock() attribute.
     """
     def __init__(self):
         self.waiting_list = [] # Switch to a queue/deque if speed really matters
@@ -310,7 +320,7 @@ class WaitingList:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.waiting_list_lock.release()
 
-class ProxyObjectPipeLock:
+class _ProxyObjectPipeLock:
     '''Raises an educational exception (rather than blocking) when you try
        to acquire a locked lock.'''
     def __init__(self):
@@ -318,11 +328,11 @@ class ProxyObjectPipeLock:
 
     def __enter__(self):
         if not self.lock.acquire(blocking=False):
-            raise RuntimeError('''
-                Two different threads tried to use the same ProxyObject at the
-                same time! This is bad. Look at the docstring of
-                proxy_objects.py to see an example of how to use a Custody
-                object to avoid this problem.''')
+            raise RuntimeError(
+                "Two different threads tried to use the same ProxyObject " +
+                "at the same time! This is bad. Look at the docstring of " +
+                "proxy_objects.py to see an example of how to use a _Custody " +
+                "object to avoid this problem.")
         return self.lock
 
     def __exit__(self, exc_type, exc_val, exc_tb):
@@ -364,6 +374,9 @@ def launch_thread(target, first_resource=None, args=(), kwargs={}):
     """
     custody = _Custody() # Useful for synchronization in the launched thread
     if first_resource is not None:
+        # Get in line for custody of the first resource the launched
+        # thread will use, but don't *wait* in that line; the launched
+        # thread should do the waiting, not the main thread:
         custody.switch_from(None, first_resource, wait=False)
     kwargs['custody'] = custody
     thread = threading.Thread(target=target, args=args, kwargs=kwargs)
@@ -372,13 +385,23 @@ def launch_thread(target, first_resource=None, args=(), kwargs={}):
 
 class _Custody:
     def __init__(self):
-        """TODO: docstring"""
+        """For synchronization of single-thread-at-a-time shared resources.
+
+        See the docstring at the start of this module for example usage.
+        For _Custody() to be useful, at least some of the objects
+        accessed by your launched thread must be ProxyObject()s,
+        WaitingList()s, or WaitingList-like objects.
+        """
         self.permission_slip = threading.Lock()
         self.permission_slip.acquire()
         self.first_in_line = False
 
     def switch_from(self, resource, to=None, wait=True):
-        """TODO: docstring"""
+        """Get in line for a shared resource, then abandon your current resource
+
+        If wait==True, also wait in that line until it's your turn to
+        own the next shared resource.
+        """
         assert resource is not None or to is not None
         if to is not None:
             to_waiting_list, to_waiting_list_lock = _get_list_and_lock(to)
@@ -396,7 +419,7 @@ class _Custody:
             self._wait_for(to)
 
     def _wait_for(self, resource):
-        """TODO: docstring"""
+        """Wait in line until it's your turn."""
         waiting_list, _ = _get_list_and_lock(resource)
         if self.first_in_line:
             assert self is waiting_list[0]
@@ -412,7 +435,8 @@ class _SharedNumpyArray(np.ndarray):
     """A numpy array that lives in shared memory
 
     In general, don't create these directly, create _SharedNumpyArrays
-    (and ProxyObjects) through an instance of ProxyManager.
+    (and ProxyObjects that use them) through calls to an instance of
+    ProxyManager.
 
     Inputs and outputs to/from proxied objects are 'serialized', which
     is pretty fast - except for large in-memory objects. The only large
@@ -430,8 +454,8 @@ class _SharedNumpyArray(np.ndarray):
     _SharedNumpyArray is a compromise: maybe you wanted to write code that
     looks like this:
 
-        data_buf = np.zeros((400, 2000, 2000), dtype=np.uint16)
-        display_buf = np.zeros((2000, 2000), dtype=np.uint8)
+        data_buf = np.zeros((400, 2000, 2000), dtype='uint16')
+        display_buf = np.zeros((2000, 2000), dtype='uint8')
 
         camera = Camera()
         preprocessor = Preprocessor()
@@ -444,8 +468,8 @@ class _SharedNumpyArray(np.ndarray):
     ...but instead you write code that looks like this:
 
         pm = ProxyManager(shared_memory_sizes=(400*2000*2000*2, 2000*2000))
-        data_buf = pm.shared_numpy_array(0, (400, 2000, 2000), dtype=np.uint16)
-        display_buf = pm.shared_numpy_array(1, (2000, 2000), dtype=np.uint8)
+        data_buf = pm.shared_numpy_array(0, (400, 2000, 2000), dtype='uint16')
+        display_buf = pm.shared_numpy_array(1, (2000, 2000), dtype='uint8')
 
         camera = pm.proxy_object(Camera)
         preprocessor = pm.proxy_object(Preprocessor)
@@ -515,7 +539,7 @@ class _SharedNumpyArrayStub():
                                  self.offset, self.strides, self.order)
 
 def _disconnect_shared_arrays(args, kwargs):
-    """Replaces _SharedNumpyArrays in the args and kwargs with new stubs
+    """Replaces _SharedNumpyArrays in 'args' and 'kwargs' with new stubs
     """
     args = tuple(a._disconnect()
                  if isinstance(a, _SharedNumpyArray) else a
@@ -526,7 +550,7 @@ def _disconnect_shared_arrays(args, kwargs):
     return args, kwargs
 
 def _reconnect_shared_arrays(args, kwargs, shared_arrays):
-    """Replaces stubs in the args and kwargs with new _SharedNumpyArrays
+    """Replaces stubs in 'args' and 'kwargs' with new _SharedNumpyArrays
     """
     args = tuple(a._reconnect(shared_arrays)
                  if isinstance(a, _SharedNumpyArrayStub) else a
@@ -536,7 +560,7 @@ def _reconnect_shared_arrays(args, kwargs, shared_arrays):
               for k, v in kwargs.items()}
     return args, kwargs
 
-# When an exception from the child process isn't handled by the parent
+# When an exception from a child process isn't handled by the parent
 # process, we'd like the parent to print the child traceback. Overriding
 # sys.excepthook seems to be the standard way to do this:
 def _my_excepthook(t, v, tb):
@@ -937,7 +961,7 @@ class _Tests():
             args = ()
         if kwargs is None:
             kwargs = {}
-        if not tqdm is None:
+        if tqdm is not None:
             f = '{desc: <38}{n: 7d}-{bar:17}|[{rate_fmt}]'
             pb = tqdm(total=n_loops, desc=name, bar_format=f)
         for i in range(n_loops):
