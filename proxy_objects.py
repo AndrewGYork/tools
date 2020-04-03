@@ -737,7 +737,7 @@ class _Tests():
         t = self.time_it(n_loops, lambda: setattr(a, 'x', 5),
                          timeout_us=100, name='Attribute setting')
         print(f" {t:.2f} \u03BCs per set-attribute.")
-        t = self.time_it(n_loops, lambda: a.z, fail=False, timeout_us=100,
+        t = self.time_it(n_loops, lambda: a.z, fail=False, timeout_us=200,
                          name='Attribute error')
         print(f" {t:.2f} \u03BCs per parent-handled exception.")
         self._test_passing_array_performance()
