@@ -141,10 +141,17 @@ class ProxyManager:
         self.shared_mp_arrays = tuple(mp.Array(C.c_uint8, sz)
                                       for sz in shared_memory_sizes)
 
-    def proxy_object(self, initializer, *initargs, **initkwargs):
+    def proxy_object(
+        self,
+        initializer,
+        *initargs,
+        custom_loop=None,
+        **initkwargs
+        ):
         """Spawn a ProxyObject that has access to shared memory.
         """
         return ProxyObject(initializer, *initargs, **initkwargs,
+                           custom_loop=custom_loop,
                            shared_mp_arrays=self.shared_mp_arrays)
 
     def shared_numpy_array(self, which_mp_array, shape, dtype=np.uint8):
@@ -163,6 +170,7 @@ class ProxyObject:
         initializer,
         *initargs,
         shared_mp_arrays=tuple(),
+        custom_loop=None,
         **initkwargs,
         ):
         """Make an object in a child process, that acts like it isn't.
@@ -182,7 +190,8 @@ class ProxyObject:
         # in a child process:
         initargs, initkwargs = _disconnect_shared_arrays(initargs, initkwargs)
         parent_pipe, child_pipe = mp.Pipe()
-        child_process = mp.Process(target=_child_loop,
+        child_loop = _child_loop if custom_loop is None else custom_loop
+        child_process = mp.Process(target=child_loop,
                                    name=initializer.__name__,
                                    args=(initializer, initargs, initkwargs,
                                          child_pipe, shared_mp_arrays))
