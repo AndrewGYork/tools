@@ -171,6 +171,9 @@ class ProxyObject:
         *initargs,
         shared_mp_arrays=tuple(),
         custom_loop=None,
+        close_method_name=None,
+        closeargs=None,
+        closekwargs=None,
         **initkwargs,
         ):
         """Make an object in a child process, that acts like it isn't.
@@ -191,10 +194,12 @@ class ProxyObject:
         initargs, initkwargs = _disconnect_shared_arrays(initargs, initkwargs)
         parent_pipe, child_pipe = mp.Pipe()
         child_loop = _child_loop if custom_loop is None else custom_loop
-        child_process = mp.Process(target=child_loop,
-                                   name=initializer.__name__,
-                                   args=(initializer, initargs, initkwargs,
-                                         child_pipe, shared_mp_arrays))
+        child_process = mp.Process(
+            target=child_loop,
+            name=initializer.__name__,
+            args=(child_pipe, shared_mp_arrays,
+                  initializer, initargs, initkwargs,
+                  close_method_name, closeargs, closekwargs))
         # Attribute-setting looks weird here because we override
         # __setattr__, and because we use a dummy object's namespace to
         # hold our attributes so we shadow as little of the proxied
@@ -212,7 +217,10 @@ class ProxyObject:
             assert _get_response(self) == 'Successfully initialized'
         # Try to ensure the child process closes when we exit:
         atexit.register(lambda: _close(self))
-        signal.signal(signal.SIGTERM, lambda s, f: _close(self))
+        try:
+            signal.signal(signal.SIGTERM, lambda s, f: _close(self))
+        except ValueError: # We are probably starting from  a thread.
+            pass # Signal handling can only happen from main thread
 
     def __getattr__(self, name):
         """Access attributes of the child-process object in the parent process.
@@ -261,7 +269,9 @@ def _close(proxy_object):
         proxy_object._.parent_pipe.send(None)
         proxy_object._.child_process.join()
 
-def _child_loop(initializer, args, kwargs, child_pipe, shared_arrays):
+def _child_loop(child_pipe, shared_arrays,
+                initializer, args, kwargs,
+                close_method_name, closeargs, closekwargs):
     """The event loop of a ProxyObject's child process
     """
     # If any of the input arguments are _SharedNumpyArrays, we have to
@@ -272,6 +282,14 @@ def _child_loop(initializer, args, kwargs, child_pipe, shared_arrays):
     try: # Create an instance of our object...
         with redirect_stdout(printed_output):
             obj = initializer(*args, **kwargs)
+            # TODO default to "close" if it exists?
+            if close_method_name is not None:
+                close_method = getattr(obj, close_method_name)
+                closeargs = tuple() if closeargs is None else closeargs
+                closekwargs = dict() if closekwargs is None else closekwargs
+                atexit.register(lambda: close_method(*closeargs, **closekwargs))
+                # TODO - what happens to print statements? Are they guaranteed
+                # to print in the main process?
         child_pipe.send(('Successfully initialized', printed_output.getvalue()))
     except Exception as e: # If we fail to initialize, just give up.
         e.child_traceback_string = traceback.format_exc()
