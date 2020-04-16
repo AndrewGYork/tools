@@ -204,6 +204,7 @@ class Camera:
         except AssertionError:
             print("\nInput argument 'out' must have dimensions:")
             print("(>=num_images - preframes, y-resolution, x-resolution)")
+            print(" and dtype='uint16'")
             raise
         except AttributeError:
             print("\nInput argument 'out' must be a numpy array",
@@ -584,6 +585,8 @@ class Camera:
             'top': wRoiY0.value,
             'right': wRoiX1.value,
             'bottom': wRoiY1.value}
+        self.height = self.roi['bottom'] - self.roi['top'] + 1
+        self.width =  self.roi['right'] - self.roi['left'] + 1
         """
         How long do we expect the chip to spend rolling? Both the 4.2
         and the 5.5 take ~10 ms to roll the full chip. Calculate the
