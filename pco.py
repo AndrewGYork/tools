@@ -310,7 +310,7 @@ class Camera:
         """
         There are two ways to access a camera setting:
 
-         1. Ask the camera directly, using a self.get_*() - type method.
+         1. Ask the camera directly, using a self._get_*() - type method.
 
           This interrogates the camera via a DLL call, updates the
           relevant attribute(s) of the Edge object, and returns the
@@ -329,6 +329,7 @@ class Camera:
         """
         if self.verbose: print("Retrieving settings from camera...")
         self._get_camera_type()
+        self._get_timestamp_mode()
         self._get_sensor_format()
         self._get_trigger_mode()
         self._get_storage_mode()
@@ -340,6 +341,30 @@ class Camera:
         self._get_temperature()
         self._get_camera_health()
         return None
+
+    def _get_timestamp_mode(self):
+        wTimeStamp = C.c_uint16(777) #777 is not an expected output
+        dll.get_timestamp_mode(self.camera_handle, wTimeStamp)
+        assert wTimeStamp.value in (0, 1, 2, 3) #wTimeStamp.value should change
+        mode_names = {0: "off",
+                      1: "binary",
+                      2: "binary+ASCII",
+                      3: "ASCII"}
+        if self.very_verbose:
+            print(" Timestamp mode:", mode_names[wTimeStamp.value])
+        self.timestamp_mode = mode_names[wTimeStamp.value]
+        return self.timestamp_mode
+
+    def _set_timestamp_mode(self, mode='off'):
+        mode_numbers = {"off": 0,
+                        "binary": 1,
+                        "binary+ASCII": 2,
+                        "ASCII": 3}
+        if self.very_verbose:
+            print(" Setting timestamp mode to:", mode)
+        dll.set_timestamp_mode(self.camera_handle, mode_numbers[mode])
+        assert self._get_timestamp_mode() == mode
+        return self.timestamp_mode
 
     def _get_sensor_format(self):
         wSensor = C.c_uint16(777) #777 is not an expected output
@@ -943,6 +968,9 @@ dll.get_sizes.argtypes = [
     C.POINTER(C.c_uint16),
     C.POINTER(C.c_uint16)]
 
+dll.get_timestamp_mode = dll.PCO_GetTimestampMode
+dll.get_timestamp_mode.argtypes = [C.c_void_p, C.POINTER(C.c_uint16)]
+
 dll.get_sensor_format = dll.PCO_GetSensorFormat
 dll.get_sensor_format.argtypes = [C.c_void_p, C.POINTER(C.c_uint16)]
 
@@ -1030,6 +1058,9 @@ dll.cancel_images.argtypes = [C.c_void_p]
 
 dll.free_buffer = dll.PCO_FreeBuffer
 dll.free_buffer.argtypes = [C.c_void_p, C.c_int16]
+
+dll.set_timestamp_mode = dll.PCO_SetTimestampMode
+dll.set_timestamp_mode.argtypes = [C.c_void_p, C.c_uint16]
 
 dll.set_sensor_format = dll.PCO_SetSensorFormat
 dll.set_sensor_format.argtypes = [C.c_void_p, C.c_uint16]
