@@ -194,8 +194,9 @@ class Camera:
         """
         if out is None:
             first_frame = 0
-            out = np.ones((num_images - preframes, self.height, self.width),
-                          dtype=np.uint16)
+            out = np.zeros((num_images - preframes, self.height, self.width),
+                           dtype=np.uint16)
+            out.fill(1)
         try:
             assert len(out.shape) == 3
             assert (out.shape[0] - first_frame) >= (num_images - preframes)
