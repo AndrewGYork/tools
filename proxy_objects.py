@@ -513,7 +513,7 @@ class _SharedNumpyArray(np.ndarray):
                 strides=None, order=None):
         dtype = np.dtype(dtype)
         assert buffer in range(len(arrays)), f'Invalid buffer: <{buffer}>'
-        requested_bytes = np.prod(shape) * dtype.itemsize
+        requested_bytes = np.prod(shape, dtype='uint64') * dtype.itemsize
         if requested_bytes > len(arrays[buffer]):
             raise ValueError("Multiprocessing shared memory array is too "+
                              "small to hold the requested Numpy array.\n " +
@@ -702,7 +702,7 @@ class _Tests():
     def test_passing_normal_numpy_array(self):
         shape = (10, 10)
         dtype = int
-        sz = int(np.prod(shape)*np.dtype(int).itemsize)
+        sz = int(np.prod(shape, dtype='uint64')*np.dtype(int).itemsize)
         pm = ProxyManager((sz, sz))
         a = np.zeros(shape, dtype)
         object_with_shared_memory = pm.proxy_object(_Tests.TestClass)
@@ -711,13 +711,14 @@ class _Tests():
     def test_passing_retrieving_shared_array(self):
         shape = (10, 10)
         dtype = int
-        sz = int(np.prod(shape)*np.dtype(int).itemsize)
+        sz = int(np.prod(shape, dtype='uint64')*np.dtype(int).itemsize)
         pm = ProxyManager((sz, sz))
         object_with_shared_memory = pm.proxy_object(_Tests.TestClass)
         a = pm.shared_numpy_array(which_mp_array=0, shape=shape, dtype=dtype)
         a.fill(0)
         a = object_with_shared_memory.test_modify_array(a)
-        assert a.sum() == np.product(shape), 'Contents of array not correct!'
+        assert (a.sum() == np.product(shape, dtype='uint64'),
+                'Contents of array not correct!')
 
     def test_raise_attribute_error(self):
         a = ProxyObject(_Tests.TestClass, 'attribute', x=4,)
@@ -781,7 +782,7 @@ class _Tests():
 
     def _test_array_passing(self, pass_by, method_name, shape, dtype, n_loops):
         dtype = np.dtype(dtype)
-        sz = int(np.prod(shape)*np.dtype(int).itemsize)
+        sz = int(np.prod(shape, dtype='uint64')*np.dtype(int).itemsize)
         pm = ProxyManager((sz, sz))
         direction = '<->' if method_name == 'test_modify_array' else '->'
         name = f'{shape} array {direction} {pass_by}'
