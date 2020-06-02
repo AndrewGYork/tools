@@ -48,18 +48,16 @@ class Camera:
         """
         * 'trigger' can be 'auto_trigger' or 'external_trigger' See the
           comment block in _get_trigger_mode() for further details.
-        * 'exposure_time_microseconds' can be as low as 107 and as high
-          as 1000000.
+        * 'exposure_time_microseconds' can be as low as 100 and as high
+          as 10000000.
         * 'region_of_interest' will be adjusted to match the nearest
           legal ROI that the camera supports. See _legalize_roi() for
           details.
         """
         if self.armed: self.disarm()
         if self.verbose: print("Applying settings to camera...")
-        """
-        These settings matter, but we don't expose their functionality
-        through apply_settings():
-        """
+        # These settings matter, but we don't expose their functionality
+        # through apply_settings():
         dll.reset_settings_to_default(self.camera_handle)
         self._set_sensor_format('standard')
         self._set_acquire_mode('auto')
@@ -74,23 +72,17 @@ class Camera:
             self._set_pixel_rate(0)
             print('WARNING! Setting pixel rate to zero (for older versions of '
                   ' panda firmware)')
-        """
-        I think these settings don't matter for the pco.edge, but just
-        in case...
-        """
+        # I think these settings don't matter for the pco.edge, but just
+        # in case...
         self._set_storage_mode('recorder')
         self._set_recorder_submode('ring_buffer')
-        """
-        These settings change all the time:
-        """
+        # These settings change all the time:
         self._set_trigger_mode(trigger)
         self._set_exposure_time(exposure_time_microseconds)
         self._set_roi(region_of_interest)
-        """
-        It's good to check the camera health periodically. Now's as good
-        a time as any, especially since the expected result is
-        predictable: it should all be zeros.
-        """
+        # It's good to check the camera health periodically. Now's as
+        # good  a time as any, especially since the expected result is
+        # predictable: it should all be zeros.
         camera_health = self._get_camera_health()
         for k, v in camera_health.items():
             if k == 'status' and self.camera_type == 'panda 4.2':
@@ -118,9 +110,7 @@ class Camera:
         if self.very_verbose:
             print(" Camera ROI dimensions:",
                   self.width, "(l/r) by", self.height, "(u/d)")
-        """
-        Allocate buffers that the camera will use to hold images.
-        """
+        # Allocate buffers that the camera will use to hold images.
         self.buffer_pointers = []
         for i in range(num_buffers):
             buffer_number = C.c_int16(-1)
@@ -141,9 +131,7 @@ class Camera:
         dll.set_recording_state(self.camera_handle, 1)
         self.armed = True
         if self.verbose: print(" Camera armed.")
-        """
-        Add our allocated buffers to the camera's 'driver queue'
-        """
+        # Add our allocated buffers to the camera's 'driver queue'
         self.added_buffers = []
         for buf_num in range(len(self.buffer_pointers)):
             dll.add_buffer(
@@ -188,15 +176,16 @@ class Camera:
         first_trigger_timeout_seconds=0,
         ):
         if not self.armed: self.arm()
-        """
-        We'll store our images in a numpy array. Did the user provide
-        one, or should we allocate one ourselves?
-        """
+        # We'll store our images in a numpy array. Did the user provide
+        # one, or should we allocate one ourselves?
         if out is None:
             first_frame = 0
             out = np.zeros((num_images - preframes, self.height, self.width),
-                           dtype=np.uint16)
-            out.fill(1)
+                           'uint16')
+            out[:, 1, 1].fill(1) # For error checking empty images
+            return_value = out
+        else:
+            return_value = None # Output is placed in the 'out' array
         try:
             assert len(out.shape) == 3
             assert (out.shape[0] - first_frame) >= (num_images - preframes)
@@ -211,25 +200,19 @@ class Camera:
             print("\nInput argument 'out' must be a numpy array",
                   "(to hold our images)")
             raise
-        """
-        Try to record some images, and try to tolerate the many possible
-        ways this can fail.
-        """
+        # Try to record some images, and try to tolerate the many
+        # possible  ways this can fail.
         if self.verbose: print("Acquiring", num_images, "images...")
         num_acquired = 0
         for which_im in range(num_images):
-            """
-            Hassle the camera until it gives us a buffer. The only ways
-            we exit this 'while' loop are by getting a buffer or running
-            out of patience.
-            """
+            # Hassle the camera until it gives us a buffer. The only
+            # ways  we exit this 'while' loop are by getting a buffer or
+            # running  out of patience.
             self.num_polls = 0
             self.num_sleeps = 0
             start_time = time.perf_counter()
             while True:
-                """
-                Check if a buffer is ready
-                """
+                # Check if a buffer is ready
                 self.num_polls += 1
                 dll.get_buffer_status(
                     self.camera_handle,
@@ -242,22 +225,18 @@ class Camera:
                         print(" After", self.num_polls, "polls and", self.num_sleeps,
                               "sleeps, buffer", buffer_number, "is ready.")
                     break
-                """
-                The buffer isn't ready. How long should we wait to try
-                again? For short exposures, we'd like to poll super
-                frequently. For long exposures, we'll use time.sleep()
-                to save CPU.
-                """
+                # The buffer isn't ready. How long should we wait to try
+                # again? For short exposures, we'd like to poll super
+                # frequently. For long exposures, we'll use time.sleep()
+                # to save CPU.
                 if self.exposure_time_microseconds > 30e3:
                     time.sleep(self.exposure_time_microseconds * 1e-6 * #seconds
                                2 / sleep_timeout) #Worst case
                     self.num_sleeps += 1
-                """
-                At some point we have to admit we probably missed a
-                trigger, and give up. Give up after too many polls
-                (likely triggered by short exposures) or too many sleeps
-                (likely triggered by long exposures)
-                """
+                # At some point we have to admit we probably missed a
+                # trigger, and give up. Give up after too many polls
+                # (likely triggered by short exposures) or too many
+                # sleeps  (likely triggered by long exposures)
                 if self.num_polls > poll_timeout or self.num_sleeps > sleep_timeout:
                     elapsed_time = time.perf_counter() - start_time
                     if which_im == 0: # First image; maybe keep waiting...
@@ -285,9 +264,7 @@ class Camera:
                           hex(self._dll_status.value),
                           hex(self._driver_status.value))
                 if which_im >= preframes:
-                    """
-                    http://stackoverflow.com/a/13481676
-                    """
+                    # http://stackoverflow.com/a/13481676
                     image = np.ctypeslib.as_array( #Temporary!
                         self._image_datatype.from_address(
                             C.addressof(
@@ -305,7 +282,7 @@ class Camera:
                     16)
                 self.added_buffers.append(buffer_number)
         if self.verbose: print("Done acquiring.")
-        return out
+        return return_value
 
     def _refresh_camera_setting_attributes(self):
         """
@@ -611,13 +588,12 @@ class Camera:
             'top': wRoiY0.value,
             'right': wRoiX1.value,
             'bottom': wRoiY1.value}
-        self.height = self.roi['bottom'] - self.roi['top'] + 1
         self.width =  self.roi['right'] - self.roi['left'] + 1
-        """
-        How long do we expect the chip to spend rolling? Both the 4.2
-        and the 5.5 take ~10 ms to roll the full chip. Calculate the
-        fraction of the chip we're using and estimate the rolling time.
-        """
+        self.height = self.roi['bottom'] - self.roi['top'] + 1
+        # How long do we expect the chip to spend rolling? Both the 4.2
+        # and the 5.5 take ~10 ms to roll the full chip. Calculate the
+        # fraction of the chip we're using and estimate the rolling
+        # time.
         if self.camera_type == 'edge 4.2':
             max_lines = 1024
             full_chip_rolling_time = 1e4
@@ -703,18 +679,12 @@ def legalize_roi(
     if current_roi is None:
         current_roi = {'left': min_lr, 'right':  max_lr,
                        'top':  min_ud, 'bottom': max_ud}
-    """
-    Legalize left/right
-    """
+    # Legalize left/right
     if left is None and right is None:
-        """
-        User isn't trying to change l/r ROI; use existing ROI.
-        """
+        # User isn't trying to change l/r ROI; use existing ROI.
         left, right = current_roi['left'], current_roi['right']
     elif left is not None:
-        """
-        'left' is specified, 'left' is the master.
-        """
+        # 'left' is specified, 'left' is the master.
         if left < min_lr: #Legalize 'left'
             left = min_lr
         elif left > max_lr - min_width + 1:
@@ -730,9 +700,7 @@ def legalize_roi(
         else:
             right = left - 1 + step_lr*((right - (left - 1)) // step_lr)
     else:
-        """
-        'left' is unspecified, 'right' is specified. 'right' is the master.
-        """
+        # 'left' is unspecified, 'right' is specified. 'right' is the master.
         if right > max_lr: #Legalize 'right'
             right = max_lr
         elif right < min_lr - 1 + min_width:
@@ -747,28 +715,19 @@ def legalize_roi(
         else:
             left = right + 1 - step_lr * ((right - (left - 1)) // step_lr)
     assert min_lr <= left < left + min_width - 1 <= right <= max_lr
-    """
-    Legalize top/bottom
-    """
+    # Legalize top/bottom
     if top is None and bottom is None:
-        """
-        User isn't trying to change u/d ROI; use existing ROI.
-        """
+        # User isn't trying to change u/d ROI; use existing ROI.
         top, bottom = current_roi['top'], current_roi['bottom']
     elif top is not None:
-        """
-        'top' is specified, 'top' is the master.
-        """
+        # 'top' is specified, 'top' is the master.
         if top < min_ud: #Legalize 'top'
             top = min_ud
         if top > (max_ud - min_height)//2 + 1:
             top = (max_ud - min_height)//2 + 1
         bottom = max_ud - top + 1 #Now bottom is specified
     else:
-        """
-        'top' is unspecified, 'bottom' is specified, 'bottom' is the
-        master.
-        """
+        # 'top' is unspecified, 'bottom' is specified, 'bottom' is the master.
         if bottom > max_ud: #Legalize 'bottom'
             bottom = max_ud
         if bottom < (max_ud + min_height)//2:
@@ -779,6 +738,27 @@ def legalize_roi(
     if verbose and new_roi != roi:
         print(" ***Requested ROI must be adjusted to match the camera***")
     return new_roi
+
+def decode_timestamps(image_stack):
+    """Decode PCO image timestamps from binary-coded decimal.
+    """
+    assert len(image_stack.shape) == 3
+    assert image_stack.dtype == 'uint16'
+    timestamps = image_stack[:, 0, :14]
+    timestamps = (timestamps & 0x0F) + (timestamps >> 4) * 10
+    ts = {}
+    ts['image_number'] = np.sum(
+        timestamps[:, :4] * np.array((1e6, 1e4, 1e2, 1)),
+        axis=1, dtype='uint32')
+    ts['year'] = np.sum(
+        timestamps[:, 4:6] * np.array((1e2, 1)),
+        axis=1, dtype='uint32')
+    ts['month'] = timestamps[:, 6].astype('uint32')
+    ts['day'] = timestamps[:, 7].astype('uint32')
+    ts['microseconds'] = np.sum(
+        timestamps[:, 8:14] * np.array((3600e6, 60e6, 1e6, 1e4, 1e2, 1)),
+        axis=1, dtype='uint64')
+    return ts
 
 def pco_camera_child_process(
     data_buffers,
@@ -891,9 +871,7 @@ def pco_camera_child_process(
     camera.close()
     return None
 
-"""
-A few types of exception we'll use during recording:
-"""
+# A few types of exception we'll use during recording:
 class TimeoutError(Exception):
     def __init__(self, value, num_acquired=0):
         self.value = value
@@ -907,28 +885,37 @@ class DMAError(Exception):
     def __str__(self):
         return repr(self.value)
 
-"""
-DLL management
-"""
+# DLL management
 try:
-    dll = C.oledll.LoadLibrary("SC2_Cam")
-    """
-    If you get a WindowsError, read PCO_err.h to decypher it.
-    """
+    dll = C.oledll.LoadLibrary("./SC2_Cam.dll")
 except WindowsError:
     print("Failed to load SC2_Cam.dll")
     print("You need this to run pco.py")
     raise
 
+dll.get_error_text = dll.PCO_GetErrorText
+dll.get_error_text.argtypes = [C.c_uint32,
+                               C.c_char_p,
+                               C.c_uint32]
+def check_error(error_code):
+    if error_code == 0:
+        return 0
+    else:
+        error_description = C.c_char_p(b'*'*1000)
+        dll.get_error_text(error_code, error_description, 1000)
+        raise OSError(error_description.value.decode('ascii'))
 
 dll.open_camera = dll.PCO_OpenCamera
 dll.open_camera.argtypes = [C.POINTER(C.c_void_p), C.c_uint16]
+dll.open_camera.restype = check_error
 
 dll.close_camera = dll.PCO_CloseCamera
 dll.close_camera.argtypes = [C.c_void_p]
+dll.close_camera.restype = check_error
 
 dll.arm_camera = dll.PCO_ArmCamera
 dll.arm_camera.argtypes = [C.c_void_p]
+dll.arm_camera.restype = check_error
 
 dll.allocate_buffer = dll.PCO_AllocateBuffer
 dll.allocate_buffer.argtypes = [
@@ -937,6 +924,8 @@ dll.allocate_buffer.argtypes = [
     C.c_uint32,
     C.POINTER(C.POINTER(C.c_uint16)),
     C.POINTER(C.c_void_p)]
+dll.allocate_buffer.restype = check_error
+
 
 dll.add_buffer = dll.PCO_AddBufferEx
 dll.add_buffer.argtypes = [
@@ -947,6 +936,7 @@ dll.add_buffer.argtypes = [
     C.c_uint16,
     C.c_uint16,
     C.c_uint16]
+dll.add_buffer.restype = check_error
 
 dll.get_buffer_status = dll.PCO_GetBufferStatus
 dll.get_buffer_status.argtypes = [
@@ -954,12 +944,15 @@ dll.get_buffer_status.argtypes = [
     C.c_int16,
     C.POINTER(C.c_uint32),
     C.POINTER(C.c_uint32)]
+dll.get_buffer_status.restype = check_error
 
 dll.set_image_parameters = dll.PCO_CamLinkSetImageParameters
 dll.set_image_parameters.argtypes = [C.c_void_p, C.c_uint16, C.c_uint16]
+dll.set_image_parameters.restype = check_error
 
 dll.set_recording_state = dll.PCO_SetRecordingState
 dll.set_recording_state.argtypes = [C.c_void_p, C.c_uint16]
+dll.set_recording_state.restype = check_error
 
 dll.get_sizes = dll.PCO_GetSizes
 dll.get_sizes.argtypes = [
@@ -968,12 +961,15 @@ dll.get_sizes.argtypes = [
     C.POINTER(C.c_uint16),
     C.POINTER(C.c_uint16),
     C.POINTER(C.c_uint16)]
+dll.get_sizes.restype = check_error
 
 dll.get_timestamp_mode = dll.PCO_GetTimestampMode
 dll.get_timestamp_mode.argtypes = [C.c_void_p, C.POINTER(C.c_uint16)]
+dll.get_timestamp_mode.restype = check_error
 
 dll.get_sensor_format = dll.PCO_GetSensorFormat
 dll.get_sensor_format.argtypes = [C.c_void_p, C.POINTER(C.c_uint16)]
+dll.get_sensor_format.restype = check_error
 
 dll.get_camera_health = dll.PCO_GetCameraHealthStatus
 dll.get_camera_health.argtypes = [
@@ -981,6 +977,7 @@ dll.get_camera_health.argtypes = [
     C.POINTER(C.c_uint32),
     C.POINTER(C.c_uint32),
     C.POINTER(C.c_uint32)]
+dll.get_camera_health.restype = check_error
 
 dll.get_temperature = dll.PCO_GetTemperature
 dll.get_temperature.argtypes = [
@@ -988,24 +985,31 @@ dll.get_temperature.argtypes = [
     C.POINTER(C.c_int16),
     C.POINTER(C.c_int16),
     C.POINTER(C.c_int16)]
+dll.get_temperature.restype = check_error
 
 dll.get_trigger_mode = dll.PCO_GetTriggerMode
 dll.get_trigger_mode.argtypes = [C.c_void_p, C.POINTER(C.c_uint16)]
+dll.get_trigger_mode.restype = check_error
 
 dll.get_storage_mode = dll.PCO_GetStorageMode
 dll.get_storage_mode.argtypes = [C.c_void_p, C.POINTER(C.c_uint16)]
+dll.get_storage_mode.restype = check_error
 
 dll.get_recorder_submode = dll.PCO_GetRecorderSubmode
 dll.get_recorder_submode.argtypes = [C.c_void_p, C.POINTER(C.c_uint16)]
+dll.get_recorder_submode.restype = check_error
 
 dll.get_acquire_mode = dll.PCO_GetAcquireMode
 dll.get_acquire_mode.argtypes = [C.c_void_p, C.POINTER(C.c_uint16)]
+dll.get_acquire_mode.restype = check_error
 
 dll.get_pixel_rate = dll.PCO_GetPixelRate
 dll.get_pixel_rate.argtypes = [C.c_void_p, C.POINTER(C.c_uint32)]
+dll.get_pixel_rate.restype = check_error
 
 dll.set_pixel_rate = dll.PCO_SetPixelRate
 dll.set_pixel_rate.argtypes = [C.c_void_p, C.c_uint32]
+dll.set_pixel_rate.restype = check_error
 
 dll.get_delay_exposure_time = dll.PCO_GetDelayExposureTime
 dll.get_delay_exposure_time.argtypes = [
@@ -1014,6 +1018,7 @@ dll.get_delay_exposure_time.argtypes = [
     C.POINTER(C.c_uint32),
     C.POINTER(C.c_uint16),
     C.POINTER(C.c_uint16)]
+dll.get_delay_exposure_time.restype = check_error
 
 dll.set_delay_exposure_time = dll.PCO_SetDelayExposureTime
 dll.set_delay_exposure_time.argtypes = [
@@ -1022,6 +1027,7 @@ dll.set_delay_exposure_time.argtypes = [
     C.c_uint32,
     C.c_uint16,
     C.c_uint16]
+dll.set_delay_exposure_time.restype = check_error
 
 dll.get_roi = dll.PCO_GetROI
 dll.get_roi.argtypes = [
@@ -1030,6 +1036,7 @@ dll.get_roi.argtypes = [
     C.POINTER(C.c_uint16),
     C.POINTER(C.c_uint16),
     C.POINTER(C.c_uint16)]
+dll.get_roi.restype = check_error
 
 dll.set_roi = dll.PCO_SetROI
 dll.set_roi.argtypes = [
@@ -1038,68 +1045,78 @@ dll.set_roi.argtypes = [
     C.c_uint16,
     C.c_uint16,
     C.c_uint16]
+dll.set_roi.restype = check_error
 
 dll.get_camera_name = dll.PCO_GetCameraName
 dll.get_camera_name.argtype = [
     C.c_void_p,
     C.c_char_p,
     C.c_uint16]
+dll.get_camera_name.restype = check_error
 
 dll.reset_settings_to_default = dll.PCO_ResetSettingsToDefault
 dll.reset_settings_to_default.argtypes = [C.c_void_p]
+dll.reset_settings_to_default.restype = check_error
 
 dll.set_recording_state = dll.PCO_SetRecordingState
 dll.set_recording_state.argtypes = [C.c_void_p, C.c_uint16]
+dll.set_recording_state.restype = check_error
 
 dll.remove_buffer = dll.PCO_RemoveBuffer
 dll.remove_buffer.argtypes = [C.c_void_p]
+dll.remove_buffer.restype = check_error
 
 dll.cancel_images = dll.PCO_CancelImages
 dll.cancel_images.argtypes = [C.c_void_p]
+dll.cancel_images.restype = check_error
 
 dll.free_buffer = dll.PCO_FreeBuffer
 dll.free_buffer.argtypes = [C.c_void_p, C.c_int16]
+dll.free_buffer.restype = check_error
 
 dll.set_timestamp_mode = dll.PCO_SetTimestampMode
 dll.set_timestamp_mode.argtypes = [C.c_void_p, C.c_uint16]
+dll.set_timestamp_mode.restype = check_error
 
 dll.set_sensor_format = dll.PCO_SetSensorFormat
 dll.set_sensor_format.argtypes = [C.c_void_p, C.c_uint16]
+dll.set_sensor_format.restype = check_error
 
 dll.set_trigger_mode = dll.PCO_SetTriggerMode
 dll.set_trigger_mode.argtypes = [C.c_void_p, C.c_uint16]
+dll.set_trigger_mode.restype = check_error
 
 dll.force_trigger = dll.PCO_ForceTrigger
 dll.force_trigger.argtypes = [C.c_void_p, C.POINTER(C.c_uint16)]
+dll.force_trigger.restype = check_error
 
 dll.set_recorder_submode = dll.PCO_SetRecorderSubmode
 dll.set_recorder_submode.argtypes = [C.c_void_p, C.c_uint16]
+dll.set_recorder_submode.restype = check_error
 
 dll.set_acquire_mode = dll.PCO_SetAcquireMode
 dll.set_acquire_mode.argtypes = [C.c_void_p, C.c_uint16]
+dll.set_acquire_mode.restype = check_error
 
 dll.set_storage_mode = dll.PCO_SetStorageMode
 dll.set_storage_mode.argtypes = [C.c_void_p, C.c_uint16]
+dll.set_storage_mode.restype = check_error
 
 if __name__ == '__main__':
     camera = Camera(verbose=True, very_verbose=True)
-    """ Half-assed edge testing; give randomized semi-garbage inputs, hope
-        the plane don't crash. """
+    # Half-assed edge testing; give randomized semi-garbage inputs, hope
+    # the plane don't crash.
     blank_frames = 0
     for i in range(10000):
-        """
-        Random exposure time, biased towards shorter exposures
-        """
+        # Random exposure time, biased towards shorter exposures
         exposure = min(np.random.randint(1e2, 1e7, size=40))
-        """
-        Random ROI, potentially with some/all limits unspecified.
-        """
+        # Random ROI, potentially with some/all limits unspecified.
         roi = {
             'top': np.random.randint(low=-2000, high=3000),
             'bottom': np.random.randint(low=-2000, high=3000),
             'left': np.random.randint(low=-2000, high=3000),
             'right': np.random.randint(low=-2000, high=3000)}
-        #Delete some keys/vals
+        # Delete some keys/vals
         roi = {k: v for k, v in roi.items() if v > -10}
         camera.apply_settings(exposure_time_microseconds=exposure,
                               region_of_interest=roi)
