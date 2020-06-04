@@ -30,7 +30,7 @@ effectively uncommented; can you still figure out what it's doing?
                 ####################################################
                 #  EXAMPLE CODE (copypaste into 'test.py' and run) #
                 ####################################################
-from proxy_objects import ProxyManager, launch_thread
+from proxy_objects import ProxyManager, launch_custody_thread
 from dummy_module import Camera, Preprocessor, Display
 
 def main():
@@ -60,11 +60,11 @@ def main():
         custody.switch_from(display, to=None)
 
     for i in range(15):
-        th0 = launch_thread(target=snap, first_resource=camera,
+        th0 = launch_custody_thread(target=snap, first_resource=camera,
                             args=(data_buffers[0], display_buffers[0]))
         if i > 0:
             th1.join()
-        th1 = launch_thread(target=snap, first_resource=camera,
+        th1 = launch_custody_thread(target=snap, first_resource=camera,
                             args=(data_buffers[1], display_buffers[1]))
         th0.join()
     th1.join()
@@ -383,7 +383,7 @@ def _get_list_and_lock(resource):
     assert isinstance(waiting_list_lock, threading_lock_type)
     return waiting_list, waiting_list_lock
 
-def launch_thread(target, first_resource=None, args=(), kwargs={}):
+def launch_custody_thread(target, first_resource=None, args=(), kwargs={}):
     """A thin wrapper around threading.Thread(), useful for ProxyObjects
 
     Along with ProxyManager (and maybe ProxyObject), this is one of the
@@ -839,7 +839,7 @@ class _Tests():
                      for n in order.keys()}
         threads = []
         for i in range(num_snaps):
-            threads.append(launch_thread(snap, camera_lock, args=(i,)))
+            threads.append(launch_custody_thread(snap, camera_lock, args=(i,)))
         for th in threads:
             th.join()
 
@@ -918,7 +918,7 @@ class _Tests():
                      for n in acq_order.keys()}
         threads = []
         for i in range(num_snaps):
-            threads.append(launch_thread(snap, camera, args=(i,)))
+            threads.append(launch_custody_thread(snap, camera, args=(i,)))
         for th in threads:
             th.join()
 
