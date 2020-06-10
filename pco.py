@@ -334,7 +334,7 @@ class Camera:
                       1: "binary",
                       2: "binary+ASCII",
                       3: "ASCII"}
-        if self.very_verbose:
+        if self.verbose:
             print(" Timestamp mode:", mode_names[wTimeStamp.value])
         self.timestamp_mode = mode_names[wTimeStamp.value]
         return self.timestamp_mode
@@ -344,7 +344,7 @@ class Camera:
                         "binary": 1,
                         "binary+ASCII": 2,
                         "ASCII": 3}
-        if self.very_verbose:
+        if self.verbose:
             print(" Setting timestamp mode to:", mode)
         dll.set_timestamp_mode(self.camera_handle, mode_numbers[mode])
         assert self._get_timestamp_mode() == mode
