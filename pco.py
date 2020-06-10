@@ -54,6 +54,12 @@ class Camera:
           legal ROI that the camera supports. See _legalize_roi() for
           details.
         """
+        if trigger is None:
+            trigger = self.trigger_mode
+        if exposure_time_microseconds is None:
+            exposure_time_microseconds = self.exposure_time_microseconds
+        if region_of_interest is None:
+            region_of_interest = self.roi
         if self.armed: self.disarm()
         if self.verbose: print("Applying settings to camera...")
         # These settings matter, but we don't expose their functionality
@@ -437,7 +443,8 @@ class Camera:
         trigger_mode_numbers = {
             "auto_trigger": 0,
             "software_trigger": 1,
-            "external_trigger": 2}
+            "external_trigger": 2,
+            "external_exposure": 3}
         if self.verbose: print(" Setting trigger mode to:", mode)
         dll.set_trigger_mode(self.camera_handle, trigger_mode_numbers[mode])
         assert self._get_trigger_mode() == mode
