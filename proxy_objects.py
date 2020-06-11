@@ -270,18 +270,19 @@ def _close(proxy_object):
         proxy_object._.child_process.join()
 
 def _child_loop(child_pipe, shared_arrays,
-                initializer, args, kwargs,
+                initializer, initargs, initkwargs,
                 close_method_name, closeargs, closekwargs):
     """The event loop of a ProxyObject's child process
     """
     # If any of the input arguments are _SharedNumpyArrays, we have to
     # show them where to find shared memory:
-    args, kwargs = _reconnect_shared_arrays(args, kwargs, shared_arrays)
+    initargs, initkwargs = _reconnect_shared_arrays(initargs, initkwargs,
+                                                    shared_arrays)
     # Initialization.
     printed_output = io.StringIO()
     try: # Create an instance of our object...
         with redirect_stdout(printed_output):
-            obj = initializer(*args, **kwargs)
+            obj = initializer(*initargs, **initkwargs)
             # TODO default to "close" if it exists?
             if close_method_name is not None:
                 close_method = getattr(obj, close_method_name)
