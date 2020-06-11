@@ -994,7 +994,7 @@ class _Tests():
             f = '{desc: <38}{n: 7d}-{bar:17}|[{rate_fmt}]'
             pb = tqdm(total=n_loops, desc=name, bar_format=f)
         for i in range(n_loops):
-            pb.update(1)
+            if tqdm is not None: pb.update(1)
             try:
                 func(*args, **kwargs)
             except Exception as e:
