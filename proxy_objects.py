@@ -718,8 +718,8 @@ class _Tests():
         a = pm.shared_numpy_array(which_mp_array=0, shape=shape, dtype=dtype)
         a.fill(0)
         a = object_with_shared_memory.test_modify_array(a)
-        assert (a.sum() == np.product(shape, dtype='uint64'),
-                'Contents of array not correct!')
+        assert a.sum() == np.product(shape, dtype='uint64'), (
+            'Contents of array not correct!')
 
     def test_raise_attribute_error(self):
         a = ProxyObject(_Tests.TestClass, 'attribute', x=4,)
