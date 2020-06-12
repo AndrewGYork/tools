@@ -99,8 +99,13 @@ class Camera:
                 assert v == 0
         return None
 
-    def arm(self, num_buffers=2):
+    def arm(self, num_buffers=None):
+        if not hasattr(self, '_default_num_buffers'):
+            self._default_num_buffers = 2
+        if num_buffers is None:
+            num_buffers = self._default_num_buffers
         assert 1 <= num_buffers <= 16
+        self._default_num_buffers = num_buffers
         if self.armed:
             if self.verbose:
                 print('Arm requested, but the pco camera'
