@@ -408,7 +408,17 @@ def launch_custody_thread(target, first_resource=None, args=(), kwargs={}):
         custody.switch_from(None, first_resource, wait=False)
     kwargs['custody'] = custody
     thread = threading.Thread(target=target, args=args, kwargs=kwargs)
-    thread.start()
+    try:
+        thread.start()
+    except RuntimeError as e:
+        if e.args == ("can't start new thread",):
+            print('*'*80)
+            print('Failed to launch a custody thread.')
+            print(threading.active_count(), 'threads are currently active.')
+            print('You might have reached a limit of your system;')
+            print('let some of your threads finish before launching more.')
+            print('*'*80)
+        raise
     return thread
 
 class _Custody:
