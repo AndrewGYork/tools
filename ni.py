@@ -142,7 +142,7 @@ class Analog_Out:
         else:
             self.clock_name = clock_name
         self.set_rate(rate)
-        self._write_voltages()
+        self._write_voltages(self.voltages)
         if self.has_clock:
             self.play_voltages(force_final_zeros=False, block=True)
         else:
@@ -190,19 +190,7 @@ class Analog_Out:
         """
         self._ensure_task_is_stopped()
         if voltages is not None:
-            assert len(voltages.shape) == 2
-            assert voltages.dtype == self.voltages.dtype
-            assert voltages.shape[0] >= 2
-            assert voltages.shape[1] == self.num_channels
-            if force_final_zeros:
-                if self.verbose:
-                    print("***Coercing voltages to end in zero!***")
-                voltages[-1, :] = 0
-            old_voltages_shape = self.voltages.shape
-            self.voltages = voltages
-            if self.voltages.shape[0] != old_voltages_shape[0]:
-                self.set_rate(self.rate)
-            self._write_voltages()
+            self._write_voltages(voltages, force_final_zeros)
         if self.verbose: print("Playing voltages...")
         check(api.start_task(self.task_handle))
         self._task_running = True
@@ -263,11 +251,24 @@ class Analog_Out:
             self._task_running = False
         return None
 
-    def _write_voltages(self):
+    def _write_voltages(self, voltages, force_final_zeros=True):
+        assert len(voltages.shape) == 2
+        assert voltages.dtype == self.voltages.dtype
+        assert voltages.shape[0] >= 2
+        assert voltages.shape[1] == self.num_channels
+        if force_final_zeros:
+            if self.verbose:
+                print("***Coercing voltages to end in zero!***")
+            voltages[-1, :] = 0
+        old_voltages_shape = self.voltages.shape
+        self.voltages = voltages
+        if self.voltages.shape[0] != old_voltages_shape[0]:
+            self.set_rate(self.rate)
         if not hasattr(self, 'num_points_written'):
             self.num_points_written = C.c_int32(0)
         write = {'analog': api.write_voltages,
                  'digital': api.write_digits}[self.channel_type]
+        self._ensure_task_is_stopped()
         check(write(
             self.task_handle,
             self.voltages.shape[0], #Samples per channel
