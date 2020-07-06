@@ -116,7 +116,7 @@ class Analog_Out:
 
         if self.verbose: print("Opening %s-out board..."%self.channel_type)
         self.task_handle = C.c_void_p(0)
-        check(api.create_task(bytes(), self.task_handle))
+        api.create_task(bytes(), self.task_handle)
         # If I were a real man, I would automatically detect the proper
         # board name somehow
     # (http://digital.ni.com/public.nsf/allkb/86256F0E001DA9FF492572A5006FD7D3)
@@ -130,20 +130,20 @@ class Analog_Out:
             '0:%i'%(self.num_channels - 1),
             'ascii')
         if self.channel_type == 'analog':
-            check(api.create_ao_voltage_channel(
+            api.create_ao_voltage_channel(
                 self.task_handle,
                 device_name,
                 b"",
                 -10, #Minimum voltage
                 +10.0, #Maximum voltage
                 10348, #DAQmx_Val_Volts; don't question it!
-                None)) #NULL
+                None) #NULL
         elif self.channel_type == 'digital':
-            check(api.create_do_channel(
+            api.create_do_channel(
                 self.task_handle,
                 device_name,
                 b"",
-                1)) #DAQmx_Val_ChanForAllLines; don't question it!
+                1) #DAQmx_Val_ChanForAllLines; don't question it!
         if self.verbose: print(" Board open.")
         self.board_name = board_name
         dtype = {'digital': np.uint8, 'analog': np.float64}[self.channel_type]
@@ -168,13 +168,13 @@ class Analog_Out:
         self._ensure_task_is_stopped()
         assert 0 < rate <= self.max_rate
         self.rate = float(rate)
-        check(api.clock_timing(
+        api.clock_timing(
             self.task_handle,
             self.clock_name, #NULL, to specify onboard clock for timing
             self.rate,
             10280, #DAQmx_Val_Rising (doesn't matter)
             10178, #DAQmx_Val_FiniteSamps (run once)
-            self.voltages.shape[0]))
+            self.voltages.shape[0])
         return None
 
     def play_voltages(
@@ -204,7 +204,7 @@ class Analog_Out:
         if voltages is not None:
             self._write_voltages(voltages, force_final_zeros)
         if self.verbose: print("Playing voltages...")
-        check(api.start_task(self.task_handle))
+        api.start_task(self.task_handle)
         self._task_running = True
         if block:
             self._ensure_task_is_stopped()
@@ -213,7 +213,7 @@ class Analog_Out:
     def close(self):
         self._ensure_task_is_stopped()
         if self.verbose: print("Closing %s board..."%self.daq_type)
-        check(api.clear_task(self.task_handle))
+        api.clear_task(self.task_handle)
         if self.verbose: print(" %s board is closed."%self.daq_type)
         return None
 
@@ -257,9 +257,9 @@ class Analog_Out:
             self._task_running = False
         if self._task_running:
             if self.verbose: print("Waiting for board to finish playing...")
-            check(api.finish_task(self.task_handle, -1))
+            api.finish_task(self.task_handle, -1)
             if self.verbose: print(" NI%s is finished playing."%self.daq_type)
-            check(api.stop_task(self.task_handle))
+            api.stop_task(self.task_handle)
             self._task_running = False
         return None
 
@@ -281,7 +281,7 @@ class Analog_Out:
         write = {'analog': api.write_voltages,
                  'digital': api.write_digits}[self.channel_type]
         self._ensure_task_is_stopped()
-        check(write(
+        write(
             self.task_handle,
             self.voltages.shape[0], #Samples per channel
             0, #Set autostart to False
@@ -289,7 +289,7 @@ class Analog_Out:
             1, #DAQmx_Val_GroupByScanNumber (interleaved)
             self.voltages,
             self.num_points_written,
-            None))
+            None)
         if self.verbose:
             print(self.num_points_written.value,
                   "points written to each %s channel."%self.daq_type)
@@ -305,8 +305,20 @@ PCI_6733 = Analog_Out # Backwards compatible
 api.get_error_info = api.DAQmxGetExtendedErrorInfo
 api.get_error_info.argtypes = [C.c_char_p, C.c_uint32]
 
+def check_error(error_code):
+    if error_code != 0:
+        num_bytes = api.get_error_info(None, 0)
+        print("Error message from NI DAQ: (", num_bytes, "bytes )")
+        error_buffer = (C.c_char * num_bytes)()
+        api.get_error_info(error_buffer, num_bytes)
+        print(error_buffer.value.decode('ascii'))
+        raise UserWarning(
+            "NI DAQ error code: %i; see above for details."%(error_code))
+    return error_code
+
 api.create_task = api.DAQmxCreateTask
 api.create_task.argtypes = [C.c_char_p, C.POINTER(C.c_void_p)]
+api.create_task.restype = check_error
 
 api.create_ao_voltage_channel = api.DAQmxCreateAOVoltageChan
 api.create_ao_voltage_channel.argtypes = [
@@ -317,6 +329,7 @@ api.create_ao_voltage_channel.argtypes = [
     C.c_double,
     C.c_int32,
     C.c_char_p]
+api.create_ao_voltage_channel.restype = check_error
 
 api.create_do_channel = api.DAQmxCreateDOChan
 api.create_do_channel.argtypes = [
@@ -324,6 +337,7 @@ api.create_do_channel.argtypes = [
     C.c_char_p,
     C.c_char_p,
     C.c_int32]
+api.create_do_channel.restype = check_error
 
 api.clock_timing = api.DAQmxCfgSampClkTiming
 api.clock_timing.argtypes = [
@@ -333,6 +347,7 @@ api.clock_timing.argtypes = [
     C.c_int32,
     C.c_int32,
     C.c_uint64]
+api.clock_timing.restype = check_error
 
 api.write_voltages = api.DAQmxWriteAnalogF64
 api.write_voltages.argtypes = [
@@ -344,6 +359,7 @@ api.write_voltages.argtypes = [
     np.ctypeslib.ndpointer(dtype=np.float64, ndim=2), #Numpy is awesome.
     C.POINTER(C.c_int32),
     C.POINTER(C.c_uint32)]
+api.write_voltages.restype = check_error
 
 api.write_digits = api.DAQmxWriteDigitalLines
 api.write_digits.argtypes = [
@@ -355,28 +371,23 @@ api.write_digits.argtypes = [
     np.ctypeslib.ndpointer(dtype=np.uint8, ndim=2), #Numpy is awesome.
     C.POINTER(C.c_int32),
     C.POINTER(C.c_uint32)]
+api.write_digits.restype = check_error
 
 api.start_task = api.DAQmxStartTask
 api.start_task.argtypes = [C.c_void_p]
+api.start_task.restype = check_error
 
 api.finish_task = api.DAQmxWaitUntilTaskDone
 api.finish_task.argtypes = [C.c_void_p, C.c_double]
+api.finish_task.restype = check_error
 
 api.stop_task = api.DAQmxStopTask
 api.stop_task.argtypes = [C.c_void_p]
+api.stop_task.restype = check_error
 
 api.clear_task = api.DAQmxClearTask
 api.clear_task.argtypes = [C.c_void_p]
-
-def check(error_code):
-    if error_code != 0:
-        num_bytes = api.get_error_info(None, 0)
-        print("Error message from NI DAQ: (", num_bytes, "bytes )")
-        error_buffer = (C.c_char * num_bytes)()
-        api.get_error_info(error_buffer, num_bytes)
-        print(error_buffer.value.decode('ascii'))
-        raise UserWarning(
-            "NI DAQ error code: %i; see above for details."%(error_code))
+api.clear_task.restype = check_error
 
 if __name__ == '__main__':
     ## Test basic functionality of the Analog_Out object
