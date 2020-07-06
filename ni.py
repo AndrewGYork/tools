@@ -26,9 +26,11 @@ class Analog_Out:
 
         So far, I've only tested this for the PCI 6733 and the NI 9263.
         """
-        assert daq_type in (
-            '6733', '6733_digital', '6738', '6738_digital', '9263', '9401',
-            '6001'), "We don't support this card (%s) yet" % daq_type
+        allowed_cards = ['6733', '6733_digital',
+                         '6738', '6738_digital',
+                         '6739', '6739_digital',
+                         '9263', '9401', '6001']
+        assert daq_type in allowed_cards, "We don't support this card (%s) yet" % daq_type
         self.daq_type = daq_type
         if self.daq_type == '6733':
             self.max_channels = 8
@@ -69,6 +71,16 @@ class Analog_Out:
             # are 8 digital lines on `port1`, but these are not "buffered". We
             # have not yet included any functionality for these lines.
             self.max_channels = 2
+            self.max_rate = 1e6 #TODO is this the correct max rate?
+            self.channel_type = 'digital'
+            self.has_clock = False
+        elif self.daq_type == '6739':
+            self.max_channels = 64 #TODO is this correct?
+            self.max_rate = 1e6 #TODO is this the correct max rate?
+            self.channel_type = 'analog'
+            self.has_clock = True
+        elif self.daq_type == '6739_digital':
+            self.max_channels = 2 #TODO is this correct?
             self.max_rate = 1e6 #TODO is this the correct max rate?
             self.channel_type = 'digital'
             self.has_clock = False
@@ -412,33 +424,46 @@ if __name__ == '__main__':
     #     board_name=ao_name,
     #     verbose=False)
 
-    ## 6738 test block
-    rate = 2e4
-    do_type = '6738_digital'
-    do_name = 'Dev1'
-    do_nchannels = 2
-    do_clock = '/Dev1/ao/SampleClock'
-    do = Analog_Out(
-        num_channels=do_nchannels,
-        rate=rate,
-        daq_type=do_type,
-        board_name=do_name,
-        clock_name=do_clock,
-        verbose=False)
-    ao_type = '6738'
-    ao_name = 'Dev1'
-    ao_nchannels = 8
+##    ## 6738 test block
+##    rate = 2e4
+##    do_type = '6738_digital'
+##    do_name = 'Dev1'
+##    do_nchannels = 2
+##    do_clock = '/Dev1/ao/SampleClock'
+##    do = Analog_Out(
+##        num_channels=do_nchannels,
+##        rate=rate,
+##        daq_type=do_type,
+##        board_name=do_name,
+##        clock_name=do_clock,
+##        verbose=False)
+##    ao_type = '6738'
+##    ao_name = 'Dev1'
+##    ao_nchannels = 8
+##    ao = Analog_Out(
+##        num_channels=ao_nchannels,
+##        rate=rate,
+##        daq_type=ao_type,
+##        board_name=ao_name,
+##        verbose=False)
+##    digits = np.zeros((do.s2p(1), do_nchannels), np.dtype(np.uint8))
+##    volts = np.zeros((ao.s2p(1), ao_nchannels), np.dtype(np.float64))
+##    digits[do.s2p(.25):do.s2p(.75), :] = 1
+##    volts[ao.s2p(.25):ao.s2p(.75), :] = 10
+##    do.play_voltages(digits, block=False)
+##    ao.play_voltages(volts, block=True)
+##    do.close()
+##    ao.close()
+
+    ## PXI 6739 test block
+    ao_nchannels = 30
     ao = Analog_Out(
         num_channels=ao_nchannels,
-        rate=rate,
-        daq_type=ao_type,
-        board_name=ao_name,
-        verbose=False)
-    digits = np.zeros((do.s2p(1), do_nchannels), np.dtype(np.uint8))
-    volts = np.zeros((ao.s2p(1), ao_nchannels), np.dtype(np.float64))
-    digits[do.s2p(.25):do.s2p(.75), :] = 1
+        rate=1e5,
+        daq_type='6739',
+        board_name='PXI1Slot2',
+        verbose=True)
+    volts = np.zeros((ao.s2p(1), ao_nchannels), 'float64')
     volts[ao.s2p(.25):ao.s2p(.75), :] = 10
-    do.play_voltages(digits, block=False)
     ao.play_voltages(volts, block=True)
-    do.close()
     ao.close()
