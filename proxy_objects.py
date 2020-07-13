@@ -604,10 +604,10 @@ def _reconnect_shared_arrays(args, kwargs, shared_arrays):
 # to do this:
 def _try_to_print_child_traceback(v):
     if hasattr(v, 'child_traceback_string'):
-        print(f'{" Child Process Traceback ":v^80s}\n',
+        print(f'{" Child Process Traceback ":v^79s}\n',
               v.child_traceback_string,
-              f'{" Child Process Traceback ":^^80s}\n',
-              f'{" Main Process Traceback ":v^80s}')
+              f'{" Child Process Traceback ":^^79s}\n',
+              f'{" Main Process Traceback ":v^79s}')
     
 def _my_excepthook(t, v, tb):
     """Show a traceback when a child exception isn't handled by the parent.
