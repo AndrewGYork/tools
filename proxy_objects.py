@@ -600,18 +600,32 @@ def _reconnect_shared_arrays(args, kwargs, shared_arrays):
 
 # When an exception from a child process isn't handled by the parent
 # process, we'd like the parent to print the child traceback. Overriding
-# sys.excepthook seems to be the standard way to do this:
-def _my_excepthook(t, v, tb):
-    """Show a traceback when a child exception isn't handled by the parent.
-    """
+# sys.excepthook and threading.excepthook seems to be the standard way
+# to do this:
+def _try_to_print_child_traceback(v):
     if hasattr(v, 'child_traceback_string'):
         print(f'{" Child Process Traceback ":v^80s}\n',
               v.child_traceback_string,
               f'{" Child Process Traceback ":^^80s}\n',
               f'{" Main Process Traceback ":v^80s}')
-    sys.__excepthook__(t, v, tb)
+    
+def _my_excepthook(t, v, tb):
+    """Show a traceback when a child exception isn't handled by the parent.
+    """
+    _try_to_print_child_traceback(v)
+    return sys.__excepthook__(t, v, tb)
 
 sys.excepthook = _my_excepthook
+
+_original_threading_excepthook = threading.excepthook
+
+def _my_threading_excepthook(args):
+    """Show a traceback when a child exception isn't handled by the parent.
+    """
+    _try_to_print_child_traceback(args.exc_value)
+    return _original_threading_excepthook(args)
+
+threading.excepthook = _my_threading_excepthook
 
 # Multiprocessing code works fairly differently depending whether you
 # use 'spawn' or 'fork'. Since 'spawn' seems to be available on every
