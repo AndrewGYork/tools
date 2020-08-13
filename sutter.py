@@ -49,6 +49,7 @@ class Lambda_10_3:
 
     def close(self):
         if self.verbose: print('Closing Sutter Lambda_10_3 COM port...', end='')
+        self.move(0)
         self.port.close()
         if self.verbose: print('done.')
         return None
