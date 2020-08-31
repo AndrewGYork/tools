@@ -210,7 +210,7 @@ class ProxyObject:
         self._.child_pipe = child_pipe
         self._.child_process = child_process
         self._.shared_mp_arrays = shared_mp_arrays
-        self._.waiting_list = WaitingList()
+        self._.waiting_list = _WaitingList()
         # Make sure the child process initialized successfully:
         with self._.parent_pipe_lock:
             self._.child_process.start()
@@ -328,11 +328,11 @@ class _DummyClass:
 def _dummy_function():
     return None
 
-class WaitingList:
+class _WaitingList:
     """For synchronization of one-thread-at-a-time shared resources
 
-    Each ProxyObject has a WaitingList; if you want to define your own
-    WaitingList-like objects that can interact with
+    Each ProxyObject has a _WaitingList; if you want to define your own
+    _WaitingList-like objects that can interact with
     _Custody.switch_from() and _Custody._wait_for(), make sure they have
     a waiting_list = [] attribute, and a waiting_list_lock =
     threading.Lock() attribute.
@@ -371,20 +371,20 @@ threading_lock_type = type(threading.Lock()) # Used for typechecking
 def _get_list_and_lock(resource):
     """Convenience function.
 
-    Expected input: A ProxyObject, a WaitingList, or a
-    WaitingList-like object with 'waiting_list' and
+    Expected input: A ProxyObject, a _WaitingList, or a
+    _WaitingList-like object with 'waiting_list' and
     'waiting_list_lock' attributes.
     """
     if isinstance(resource, ProxyObject):
         waiting_list = resource._.waiting_list.waiting_list
         waiting_list_lock = resource._.waiting_list.waiting_list_lock
-    else: # Either a WaitingList, or a good enough impression
+    else: # Either a _WaitingList, or a good enough impression
         waiting_list = resource.waiting_list
         waiting_list_lock = resource.waiting_list_lock
     assert isinstance(waiting_list_lock, threading_lock_type)
     return waiting_list, waiting_list_lock
 
-def launch_custody_thread(target, first_resource=None, args=(), kwargs={}):
+def launch_custody_thread(target, first_resource=None, args=(), kwargs=None):
     """A thin wrapper around threading.Thread(), useful for ProxyObjects
 
     Along with ProxyManager (and maybe ProxyObject), this is one of the
@@ -395,11 +395,12 @@ def launch_custody_thread(target, first_resource=None, args=(), kwargs={}):
     instance of _Custody()), which will be used to call
     'custody.switch_from()' (and 'custody._wait_for()').
 
-    'first_resource' is an instance of ProxyObject, WaitingList,
-    or a WaitingList-like object. The 'target' function is
+    'first_resource' is an instance of ProxyObject, _WaitingList,
+    or a _WaitingList-like object. The 'target' function is
     expected to call custody.switch_from(None, first_resource) almost
     immediately (waiting in line until the shared resource is available).
     """
+    if kwargs is None: kwargs = {}
     custody = _Custody() # Useful for synchronization in the launched thread
     if first_resource is not None:
         # Get in line for custody of the first resource the launched
@@ -407,7 +408,12 @@ def launch_custody_thread(target, first_resource=None, args=(), kwargs={}):
         # thread should do the waiting, not the main thread:
         custody.switch_from(None, first_resource, wait=False)
     kwargs['custody'] = custody
-    thread = threading.Thread(target=target, args=args, kwargs=kwargs)
+    thread = launch_thread(target, args, kwargs)
+    return thread
+
+def launch_thread(target, args=(), kwargs=None):
+    if kwargs is None: kwargs = {}
+    thread = _RaiseOnJoinThread(target=target, args=args, kwargs=kwargs)
     try:
         thread.start()
     except RuntimeError as e:
@@ -428,7 +434,7 @@ class _Custody:
         See the docstring at the start of this module for example usage.
         For _Custody() to be useful, at least some of the objects
         accessed by your launched thread must be ProxyObject()s,
-        WaitingList()s, or WaitingList-like objects.
+        _WaitingList()s, or _WaitingList-like objects.
         """
         self.permission_slip = threading.Lock()
         self.permission_slip.acquire()
@@ -608,7 +614,7 @@ def _try_to_print_child_traceback(v):
               v.child_traceback_string,
               f'{" Child Process Traceback ":^^79s}\n',
               f'{" Main Process Traceback ":v^79s}')
-    
+
 def _my_excepthook(t, v, tb):
     """Show a traceback when a child exception isn't handled by the parent.
     """
@@ -617,12 +623,23 @@ def _my_excepthook(t, v, tb):
 
 sys.excepthook = _my_excepthook
 
+class _RaiseOnJoinThread(threading.Thread):
+    def join(self):
+        super().join()
+        if hasattr(self, 'exc_value'):
+            raise self.exc_value
+
 _original_threading_excepthook = threading.excepthook
 
 def _my_threading_excepthook(args):
     """Show a traceback when a child exception isn't handled by the parent.
     """
-    _try_to_print_child_traceback(args.exc_value)
+    if isinstance(args.thread, _RaiseOnJoinThread):
+        args.thread.exc_value = args.exc_value
+        args.thread.exc_traceback = args.exc_traceback
+        args.thread.exc_type = args.exc_type
+    else:
+        _try_to_print_child_traceback(args.exc_value)
     return _original_threading_excepthook(args)
 
 threading.excepthook = _my_threading_excepthook
@@ -830,8 +847,8 @@ class _Tests():
         except ImportError:
             tqdm = None # No progress bars :(
 
-        camera_lock = WaitingList()
-        display_lock = WaitingList()
+        camera_lock = _WaitingList()
+        display_lock = _WaitingList()
 
         def snap(i, custody):
             if not tqdm is None: pbars['camera'].update(1)
