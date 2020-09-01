@@ -333,7 +333,7 @@ class _WaitingList:
 
     Each ProxyObject has a _WaitingList; if you want to define your own
     _WaitingList-like objects that can interact with
-    _Custody.switch_from() and _Custody._wait_for(), make sure they have
+    _Custody.switch_from() and _Custody._wait_in_line(), make sure they have
     a waiting_list = [] attribute, and a waiting_list_lock =
     threading.Lock() attribute.
     """
@@ -393,7 +393,7 @@ def launch_custody_thread(target, first_resource=None, args=(), kwargs=None):
 
     The 'target' function must accept a 'custody' keyword argument (an
     instance of _Custody()), which will be used to call
-    'custody.switch_from()' (and 'custody._wait_for()').
+    'custody.switch_from()' (and 'custody._wait_in_line()').
 
     'first_resource' is an instance of ProxyObject, _WaitingList,
     or a _WaitingList-like object. The 'target' function is
@@ -409,9 +409,25 @@ def launch_custody_thread(target, first_resource=None, args=(), kwargs=None):
         custody.switch_from(None, first_resource, wait=False)
     kwargs['custody'] = custody
     thread = launch_thread(target, args, kwargs)
+    thread.custody = custody
     return thread
 
 def launch_thread(target, args=(), kwargs=None):
+    """A thin wrapper around thread.Thread(), useful for ProxyObjects.
+
+    Along with ProxyManager (and maybe ProxyObject), this is one of the
+    few definitions from this module you should call directly. See the
+    docstring at the top of this module for an example of usage.
+
+    If your thread will acquire/release custody of a ProxyObject, use
+    `launch_custody_thread` instead. Use this function to create a thread
+    (instead of threading.Thread) when you feel like you need to launch another
+    thread within a custody thread.
+
+    The main purpose of this thread is so that the resulting thread can raise an
+    exception when 'join' is called to detect if an error occoured in the
+    threaded process.
+    """
     if kwargs is None: kwargs = {}
     thread = _RaiseOnJoinThread(target=target, args=args, kwargs=kwargs)
     try:
@@ -438,7 +454,8 @@ class _Custody:
         """
         self.permission_slip = threading.Lock()
         self.permission_slip.acquire()
-        self.first_in_line = False
+        self.has_custody = False
+        self.target_resource = None
 
     def switch_from(self, resource, to=None, wait=True):
         """Get in line for a shared resource, then abandon your current resource
@@ -453,27 +470,47 @@ class _Custody:
                 if self not in to_waiting_list: # ...unless you're already in it
                     to_waiting_list.append(self)
         if resource is not None:
+            assert self.has_custody
             waiting_list, waiting_list_lock = _get_list_and_lock(resource)
             with waiting_list_lock:
                 waiting_list.pop(0) # Remove ourselves from the current line
                 if len(waiting_list) > 0: # If anyone's next...
                     waiting_list[0].permission_slip.release() # ...wake them up
-            self.first_in_line = False
-        if wait and to is not None:
-            self._wait_for(to)
+        self.has_custody = False
+        self.target_resource = to
+        if wait and self.target_resource is not None:
+            self._wait_in_line()
 
-    def _wait_for(self, resource):
+    def release(self):
+        """ Release custody of the current shared resource.
+
+        If you get custody of a shared resource and then raise an exception,
+        the next-in-line might wait forever.
+
+        'release' is useful while handling exceptions, if you want to pass
+        custody of the resource to the next-in-line.
+
+        This only works if you currently have custody, but it's hard to raise
+        an exception while waiting in line.
+        """
+        if self.has_custody:
+            self.switch_from(self.target_resource, to=None)
+        else:
+            waiting_list, waiting_list_lock = _get_list_and_lock(resource)
+            with waiting_list_lock:
+                waiting_list.remove(self)
+
+    def _wait_in_line(self): ##TODO Change references in the docs
         """Wait in line until it's your turn."""
-        waiting_list, _ = _get_list_and_lock(resource)
-        if self.first_in_line:
+        waiting_list, _ = _get_list_and_lock(self.target_resource)
+        if self.has_custody:
             assert self is waiting_list[0]
             return
         # Wait for your number to be called
-        if (self is waiting_list[0] and
-            self.permission_slip.locked()):
+        if self is waiting_list[0] and self.permission_slip.locked():
             self.permission_slip.release() # We arrived to an empty waiting list
         self.permission_slip.acquire() # Blocks if we're not first in line
-        self.first_in_line = True
+        self.has_custody = True
 
 class _SharedNumpyArray(np.ndarray):
     """A numpy array that lives in shared memory
