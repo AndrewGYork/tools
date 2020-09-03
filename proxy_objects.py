@@ -496,11 +496,13 @@ class _Custody:
         if self.has_custody:
             self.switch_from(self.target_resource, to=None)
         else:
+            if self.target_resource is None:
+                return
             waiting_list, waiting_list_lock = _get_list_and_lock(resource)
             with waiting_list_lock:
                 waiting_list.remove(self)
 
-    def _wait_in_line(self): ##TODO Change references in the docs
+    def _wait_in_line(self):
         """Wait in line until it's your turn."""
         waiting_list, _ = _get_list_and_lock(self.target_resource)
         if self.has_custody:
