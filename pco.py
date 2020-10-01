@@ -602,12 +602,12 @@ class Camera:
             'bottom': wRoiY1.value}
         self.width =  self.roi['right'] - self.roi['left'] + 1
         self.height = self.roi['bottom'] - self.roi['top'] + 1
-        self.rolling_time_microseconds =  self._calculate_rolling_time(
+        self.rolling_time_microseconds =  self._calculate_rolling_time_us(
             wRoiY0.value, wRoiY1.value)
         return self.roi
 
-    def _calculate_rolling_time(self, y0, y1):
-        '''How long do we expect the chip to spend rolling?
+    def _calculate_rolling_time_us(self, y0, y1):
+        '''How long do we expect the chip to spend rolling, in microseconds?
 
         Both the 4.2 and the 5.5 take ~10 ms to roll the full chip. Calculate
         the fraction of the chip we're using and estimate the rolling
