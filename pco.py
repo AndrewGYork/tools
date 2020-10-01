@@ -602,10 +602,17 @@ class Camera:
             'bottom': wRoiY1.value}
         self.width =  self.roi['right'] - self.roi['left'] + 1
         self.height = self.roi['bottom'] - self.roi['top'] + 1
-        # How long do we expect the chip to spend rolling? Both the 4.2
-        # and the 5.5 take ~10 ms to roll the full chip. Calculate the
-        # fraction of the chip we're using and estimate the rolling
-        # time.
+        self.rolling_time_microseconds =  self._calculate_rolling_time(
+            wRoiY0.value, wRoiY1.value)
+        return self.roi
+
+    def _calculate_rolling_time(self, y0, y1):
+        '''How long do we expect the chip to spend rolling?
+
+        Both the 4.2 and the 5.5 take ~10 ms to roll the full chip. Calculate
+        the fraction of the chip we're using and estimate the rolling
+        time.
+        '''
         if self.camera_type == 'edge 4.2':
             max_lines = 1024
             full_chip_rolling_time = 1e4
@@ -618,12 +625,9 @@ class Camera:
         # TODO: calculate rolling time for pixelfly...better
         elif self.camera_type == 'pixelfly':
             full_chip_rolling_time = 7.5e4
-            self.rolling_time_microseconds = full_chip_rolling_time
-            return self.roi
-        chip_fraction = max(wRoiY1.value - max_lines,
-                            max_lines + 1 - wRoiY0.value) / max_lines
-        self.rolling_time_microseconds =  full_chip_rolling_time * chip_fraction
-        return self.roi
+            return full_chip_rolling_time
+        chip_fraction = max(y1 - max_lines, max_lines + 1 - y0) / max_lines
+        return  full_chip_rolling_time * chip_fraction
 
     def _legalize_roi(self, roi):
         """This just calls the _legalize_roi function defined below.
