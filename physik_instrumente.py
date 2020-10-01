@@ -16,11 +16,8 @@ class C867_XY_Stage:
             raise
         self.verbose = verbose
         self._moving = False
+        self.send('HIN 1 1\nHIN 2 1', res=False)
         self._joystick_enabled = True
-        # The joystick has a 'startup macro', to make sure it behaves as
-        # desired after power switches on. Make sure nobody messed with
-        # our startup macro:
-        self._set_startup_macro()
         # Get our initial conditions:
         self.get_position()
         self.get_velocity()
@@ -71,7 +68,7 @@ class C867_XY_Stage:
         self.finish_moving()
         if self.verbose: print("Starting stage motion...")
         if self._joystick_enabled:
-            self.send('JON 3 0', res=False)
+            self.send('HIN 1 0\nHIN 2 0', res=False)
         cmd_string = ['MOV ']
         if x is not None:
             self.x = float(x)
@@ -98,7 +95,7 @@ class C867_XY_Stage:
                 break
         self._moving = False
         if self._joystick_enabled:
-            self.send('JON 3 1', res=False)
+            self.send('HIN 1 1\nHIN 2 1', res=False)      
         if self.verbose: print('Stage motion complete.\n')
         self._check_errors()
         return None
@@ -108,7 +105,7 @@ class C867_XY_Stage:
         self.x, self.y = [float(a.split('=')[1]) for a in self.send('MOV? 1 2')]
         if self.verbose: print(" Stage position:", self.x, self.y)
         return self.x, self.y
-    
+
     def set_velocity(self, vx=None, vy=None):
         assert vx is not None or vy is not None
         if self.verbose: print("Setting stage velocity...")
@@ -173,7 +170,7 @@ class C867_XY_Stage:
         if self.verbose: print("Joystick:", enabled)
         if enabled == self._joystick_enabled:
             return None
-        self.send(('JON 3 0', 'JON 3 1')[enabled], res=False)
+        self.send(('HIN 1 0\nHIN 2 0', 'HIN 1 1\nHIN 2 1')[enabled], res=False)
         self._joystick_enabled = enabled
         return None
 
@@ -232,60 +229,6 @@ class C867_XY_Stage:
         dx, dy = [int(a.split('=')[1])
                   for a in self.send('SPA? 1 0x406 2 0x406')]
         return dx, dy
-    
-    def _set_startup_macro(self):
-        if self.verbose: print("Checking stage STARTUP macro...")
-        # Check if the STARTUP macro is set to run on startup:
-        if self.send('MAC DEF?')[0] == 'STARTUP':
-            # Check if the STARTUP macro is defined
-            if 'STARTUP' in self.send('MAC?'):
-                # Check if the STARTUP macro is what we expect:
-                old_verbose, self.verbose = self.verbose, False #Temp silence
-                startup_macro = self.send('MAC? STARTUP')
-                self.verbose = old_verbose
-                if startup_macro == [
-                    'JON 1 0',
-                    'SVO 1 1 2 1',
-                    'FRF',
-                    'WAC ONT? 1 = 1',
-                    'WAC ONT? 2 = 1',
-                    'JDT 3 1 2',
-                    'JDT 3 2 2',
-                    'JAX 3 1 1',
-                    'JAX 3 2 2',
-                    'JON 3 1',
-                    'VEL 1 50 2 50']:
-                    if self.verbose: print(' Found expected stage STARTUP macro')
-                    return None
-        if self.verbose: print('Resetting STARTUP macro...')
-        # Check if there's a running macro:
-        if self.send('RMC?')[0] != '':
-            # ...which could be doing all kinds of crazy things; kill it
-            # by unsetting the startup macro and rebooting
-            self.send('MAC DEF', res=False)
-            self._reboot(finish_macro=False)
-        # Define our new startup macro:
-        self.send(
-            'MAC BEG STARTUP\n'
-            'JON 1 0\n'
-            'SVO 1 1 2 1\n'
-            'FRF\n'
-            'WAC ONT? 1 = 1\n'
-            'WAC ONT? 2 = 1\n'
-            'JDT 3 1 2\n'
-            'JDT 3 2 2\n'
-            'JAX 3 1 1\n'
-            'JAX 3 2 2\n'
-            'JON 3 1\n'
-            'VEL 1 50 2 50\n'
-            'MAC END',
-            res=False)
-        # Set it to run at startup, and reboot again.
-        self.send('MAC DEF STARTUP', res=False)
-        self._reboot()
-        # Wait for our startup macro to finish:
-        while self.send('RMC?')[0] == 'STARTUP': time.sleep(0.4)
-        return None
 
     def _reboot(self, finish_macro=True):
         if self.verbose: print('Rebooting stage', end='')
