@@ -1,5 +1,6 @@
 import time
 import ctypes as C
+import os
 import numpy as np
 
 class Camera:
@@ -903,7 +904,10 @@ class DMAError(Exception):
 
 # DLL management
 try:
-    dll = C.oledll.LoadLibrary("./SC2_Cam.dll")
+    dll_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        'SC2_Cam.dll')
+    dll = C.oledll.LoadLibrary(dll_path)
 except WindowsError:
     print("Failed to load SC2_Cam.dll")
     print("You need this to run pco.py")
