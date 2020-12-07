@@ -663,8 +663,8 @@ def _my_excepthook(t, v, tb):
 sys.excepthook = _my_excepthook
 
 class _RaiseOnJoinThread(threading.Thread):
-    def join(self, *args, **kwargs):
-        super().join(*args, **kwargs)
+    def join(self, timeout=None):
+        super().join(timeout=timeout)
         if hasattr(self, 'exc_value'):
             raise self.exc_value
 
