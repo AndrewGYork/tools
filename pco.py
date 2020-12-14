@@ -1122,6 +1122,54 @@ dll.set_storage_mode = dll.PCO_SetStorageMode
 dll.set_storage_mode.argtypes = [C.c_void_p, C.c_uint16]
 dll.set_storage_mode.restype = check_error
 
+dll.reboot_camera = dll.PCO_RebootCamera
+dll.reboot_camera.argtypes = [C.c_void_p]
+
+def reboot_camera():
+    """ Reboot the attached camera. 
+
+        While this appears to work and recover the camera from a number of
+        error states, it is normally run as a stand-alone script.
+
+        If you need to reboot the camera from within a script, the steps are:
+            * dll.reboot_camera
+            * dll.close_camera
+            * wait for reboot to complete
+            * dll.reset_dll
+            * dll.open_camera
+    """
+    print('Connecting to camera...', end='')
+    camera_handle = C.c_void_p(0)
+    dll.open_camera(camera_handle, 0)
+    print('Done!')
+
+    print('Rebooting camera...', end='')
+    dll.reboot_camera(camera_handle)
+    print('Done!')
+
+    print('Disconnecting from camera...', end='', flush=True)
+    # We know the camera was just rebooted, so no need to check armed/recording
+    # state, just close it.
+    dll.close_camera(camera_handle)
+    print('Done!')
+
+    print('Reconnecting to camera...', end='', flush=True)
+    t0, timeout = time.perf_counter(), 10
+    while True:
+        # Reboot time in approximate, keep trying to open the camera until 
+        # we are sucessful or timeout has elapsed.
+        try:
+            dll.reset_dll()
+            dll.open_camera(camera_handle, 0)
+        except OSError as e:
+            if time.perf_counter() - t0 > timeout: 
+                raise
+            time.sleep(0.2)
+        else:
+            dll.close_camera(camera_handle)
+            print('Done!')
+            return
+
 if __name__ == '__main__':
     camera = Camera(verbose=True, very_verbose=True)
     # Half-assed edge testing; give randomized semi-garbage inputs, hope
