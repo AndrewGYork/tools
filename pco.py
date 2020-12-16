@@ -1125,6 +1125,9 @@ dll.set_storage_mode.restype = check_error
 dll.reboot_camera = dll.PCO_RebootCamera
 dll.reboot_camera.argtypes = [C.c_void_p]
 
+dll.reset_dll = dll.PCO_ResetLib
+dll.reset_dll.restype = check_error
+
 def reboot_camera():
     """ Reboot the attached camera. 
 
