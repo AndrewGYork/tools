@@ -777,6 +777,52 @@ def decode_timestamps(image_stack):
         axis=1, dtype='uint64')
     return ts
 
+def reboot_camera():
+    """ Reboot the attached camera. 
+
+        While this appears to work and recover the camera from a number
+        of error states, until recently, we always ran this as a
+        stand-alone script.
+
+        If you need to reboot the camera from within a script, the steps are:
+            * dll.reboot_camera
+            * dll.close_camera
+            * wait for reboot to complete
+            * dll.reset_dll
+            * dll.open_camera
+    """
+    print('Connecting to camera...')
+    camera_handle = C.c_void_p(0)
+    dll.open_camera(camera_handle, 0)
+    print('Done connecting.')
+
+    print('Rebooting camera...')
+    dll.reboot_camera(camera_handle)
+    print('Done rebooting.')
+
+    print('Disconnecting from camera...', flush=True)
+    # We know the camera was just rebooted, so no need to check armed/recording
+    # state, just close it.
+    dll.close_camera(camera_handle)
+    print('Done disconnecting.')
+
+    print('Reconnecting to camera...', flush=True)
+    t0, timeout = time.perf_counter(), 10
+    while True:
+        # Reboot time is approximate, keep trying to open the camera until 
+        # we are sucessful or timeout has elapsed.
+        try:
+            dll.reset_dll()
+            dll.open_camera(camera_handle, 0)
+        except OSError as e:
+            if time.perf_counter() - t0 > timeout: 
+                raise
+            time.sleep(0.2)
+        else:
+            dll.close_camera(camera_handle)
+            print('Done reconnecting.')
+            return
+
 def pco_camera_child_process(
     data_buffers,
     buffer_shape,
@@ -785,6 +831,8 @@ def pco_camera_child_process(
     commands,
     ):
     """For use with image_data_pipeline.py
+
+    Probably will be deprecated soon.
 
     https://github.com/AndrewGYork/tools/blob/master/image_data_pipeline.py
     Debugged for the edge 4.2, less so for the edge 5.5, pixelfly and panda 4.2.
@@ -1127,52 +1175,6 @@ dll.reboot_camera.argtypes = [C.c_void_p]
 
 dll.reset_dll = dll.PCO_ResetLib
 dll.reset_dll.restype = check_error
-
-def reboot_camera():
-    """ Reboot the attached camera. 
-
-        While this appears to work and recover the camera from a number
-        of error states, until recently, we always ran this as a
-        stand-alone script.
-
-        If you need to reboot the camera from within a script, the steps are:
-            * dll.reboot_camera
-            * dll.close_camera
-            * wait for reboot to complete
-            * dll.reset_dll
-            * dll.open_camera
-    """
-    print('Connecting to camera...')
-    camera_handle = C.c_void_p(0)
-    dll.open_camera(camera_handle, 0)
-    print('Done connecting.')
-
-    print('Rebooting camera...')
-    dll.reboot_camera(camera_handle)
-    print('Done rebooting.')
-
-    print('Disconnecting from camera...', flush=True)
-    # We know the camera was just rebooted, so no need to check armed/recording
-    # state, just close it.
-    dll.close_camera(camera_handle)
-    print('Done disconnecting.')
-
-    print('Reconnecting to camera...', flush=True)
-    t0, timeout = time.perf_counter(), 10
-    while True:
-        # Reboot time is approximate, keep trying to open the camera until 
-        # we are sucessful or timeout has elapsed.
-        try:
-            dll.reset_dll()
-            dll.open_camera(camera_handle, 0)
-        except OSError as e:
-            if time.perf_counter() - t0 > timeout: 
-                raise
-            time.sleep(0.2)
-        else:
-            dll.close_camera(camera_handle)
-            print('Done reconnecting.')
-            return
 
 if __name__ == '__main__':
     camera = Camera(verbose=True, very_verbose=True)
