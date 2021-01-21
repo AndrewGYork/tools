@@ -305,11 +305,11 @@ def _child_loop(child_pipe, shared_arrays,
             return None
         if cmd is None: # This is how the parent signals us to exit.
             return None
-        attr_name, args, kwargs = cmd
+        method_name, args, kwargs = cmd
         args, kwargs = _reconnect_shared_arrays(args, kwargs, shared_arrays)
         try:
             with redirect_stdout(printed_output):
-                result = getattr(obj, attr_name)(*args, **kwargs)
+                result = getattr(obj, method_name)(*args, **kwargs)
             if callable(result):
                 result = _dummy_function # Cheaper than sending a real callable
             if isinstance(result, _SharedNumpyArray):
