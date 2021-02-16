@@ -266,8 +266,10 @@ def _close(proxy_object):
     if not proxy_object._.child_process.is_alive():
         return
     with proxy_object._.parent_pipe_lock:
+        # TODO? Try/except to handle broken pipes?
         proxy_object._.parent_pipe.send(None)
         proxy_object._.child_process.join()
+        proxy_object._.parent_pipe.close()
 
 def _child_loop(child_pipe, shared_arrays,
                 initializer, initargs, initkwargs,
