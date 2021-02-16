@@ -248,6 +248,9 @@ class ProxyObject:
             self._.parent_pipe.send(('__setattr__', (name, value), {}))
             return _get_response(self)
 
+    def __del__(self):
+        _close(self)
+
 def _get_response(proxy_object):
     """Effectively a method of ProxyObject, but defined externally to
     minimize shadowing of the proxied object's namespace"""
