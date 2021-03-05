@@ -1,5 +1,6 @@
 # Multiprocessing to spread CPU load, threading for concurrency:
 import multiprocessing as mp
+from multiprocessing import shared_memory
 import threading
 # Printing from a child process is tricky:
 import io
@@ -160,9 +161,7 @@ class ProxyManager:
         You can pass these shared numpy arrays to and from ProxyObjects
         without (slow) serialization.
         """
-        assert which_mp_array in range(len(self.shared_mp_arrays))
-        return _SharedNumpyArray(arrays=self.shared_mp_arrays, shape=shape,
-                                 dtype=dtype, buffer=which_mp_array)
+        return _SharedNumpyArray(shape=shape, dtype=dtype)
 
 class ProxyObject:
     def __init__(
@@ -191,7 +190,6 @@ class ProxyObject:
         """
         # Put an instance of the Python object returned by 'initializer'
         # in a child process:
-        initargs, initkwargs = _disconnect_shared_arrays(initargs, initkwargs)
         parent_pipe, child_pipe = mp.Pipe()
         child_loop = _child_loop if custom_loop is None else custom_loop
         child_process = mp.Process(
@@ -235,15 +233,12 @@ class ProxyObject:
             attr = _get_response(self)
         if callable(attr):
             def attr(*args, **kwargs):
-                args, kwargs = _disconnect_shared_arrays(args, kwargs)
                 with self._.parent_pipe_lock:
                     self._.parent_pipe.send((name, args, kwargs))
                     return _get_response(self)
         return attr
 
     def __setattr__(self, name, value):
-        if isinstance(value, _SharedNumpyArray):
-            value = value._disconnect()
         with self._.parent_pipe_lock:
             self._.parent_pipe.send(('__setattr__', (name, value), {}))
             return _get_response(self)
@@ -259,8 +254,6 @@ def _get_response(proxy_object):
         print(printed_output, end='')
     if isinstance(resp, Exception):
         raise resp
-    if isinstance(resp, _SharedNumpyArrayStub):
-        resp = resp._reconnect(proxy_object._.shared_mp_arrays)
     return resp
 
 def _close(proxy_object):
@@ -279,10 +272,6 @@ def _child_loop(child_pipe, shared_arrays,
                 close_method_name, closeargs, closekwargs):
     """The event loop of a ProxyObject's child process
     """
-    # If any of the input arguments are _SharedNumpyArrays, we have to
-    # show them where to find shared memory:
-    initargs, initkwargs = _reconnect_shared_arrays(initargs, initkwargs,
-                                                    shared_arrays)
     # Initialization.
     printed_output = io.StringIO()
     try: # Create an instance of our object...
@@ -311,14 +300,11 @@ def _child_loop(child_pipe, shared_arrays,
         if cmd is None: # This is how the parent signals us to exit.
             return None
         method_name, args, kwargs = cmd
-        args, kwargs = _reconnect_shared_arrays(args, kwargs, shared_arrays)
         try:
             with redirect_stdout(printed_output):
                 result = getattr(obj, method_name)(*args, **kwargs)
             if callable(result):
                 result = _dummy_function # Cheaper than sending a real callable
-            if isinstance(result, _SharedNumpyArray):
-                result = result._disconnect()
             child_pipe.send((result, printed_output.getvalue()))
         except Exception as e:
             e.child_traceback_string = traceback.format_exc()
@@ -570,83 +556,48 @@ class _SharedNumpyArray(np.ndarray):
     ...and your payoff is, each object gets its own CPU core, AND passing
     large numpy arrays between the processes is still really fast!
     """
-    def __new__(cls, arrays, shape=None, dtype=float, buffer=None, offset=0,
-                strides=None, order=None):
-        dtype = np.dtype(dtype)
-        assert buffer in range(len(arrays)), f'Invalid buffer: <{buffer}>'
-        requested_bytes = np.prod(shape, dtype='uint64') * dtype.itemsize
-        if requested_bytes > len(arrays[buffer]):
-            raise ValueError("Multiprocessing shared memory array is too "+
-                             "small to hold the requested Numpy array.\n " +
-                             f"{requested_bytes} > {len(arrays[buffer])}")
-        obj = super(_SharedNumpyArray, cls).__new__(cls, shape, dtype,
-                                                    arrays[buffer].get_obj(),
-                                                    offset, strides, order)
-        obj.buffer = buffer
+    def __new__(cls, shape=None, dtype=float, shared_memory_name=None,
+                offset=0, strides=None, order=None):
+        if shared_memory_name is None:
+            dtype = np.dtype(dtype)
+            requested_bytes = np.prod(shape, dtype='uint64') * dtype.itemsize
+            shm = shared_memory.SharedMemory(create=True, size=requested_bytes)
+            atexit.register(lambda: _SharedNumpyArray._unlink(shm))
+        else:
+            shm = shared_memory.SharedMemory(
+                name=shared_memory_name, create=False)
+        obj = super(_SharedNumpyArray, cls).__new__(
+            cls, shape, dtype, shm.buf, offset, strides, order)
+        obj.shared_memory = shm
+        obj.offset = offset
         return obj
 
     def __array_finalize__(self, obj):
-        if obj is None: return
-        self.offset = (
-            self.__array_interface__['data'][0] -
-            obj.__array_interface__['data'][0])
-        self.buffer = getattr(obj, 'buffer', None)
+        if obj is None:
+            return
+        if not isinstance(obj, _SharedNumpyArray):
+            raise ValueError(
+                "You can't view non-shared memory as shared memory.")
+        self.shared_memory = obj.shared_memory
+        self.offset = obj.offset
+        self.offset += (self.__array_interface__['data'][0] -
+                         obj.__array_interface__['data'][0])
 
-    def _disconnect(self):
-        """Return a tiny object describing ourselves
+    def __reduce__(self):
+        args = (
+            self.shape, self.dtype, self.shared_memory.name, self.offset,
+            self.strides, None)
+        return (_SharedNumpyArray, args)
 
-        You can pass this 'stub' down a pipe to a different process,
-        giving it enough information to cheaply re-create an equivalent
-        _SharedNumpyArray viewing the same shared memory.
-        """
-        return _SharedNumpyArrayStub(shape=self.shape, dtype=self.dtype,
-                                     buffer=self.buffer,
-                                     offset=getattr(self, 'offset', 0),
-                                     strides=self.strides,
-                                     order=None)
+    # def __del__(self):
+        # self.shared_memory.close()
 
-class _SharedNumpyArrayStub():
-    """Suitable for cheaply passing through pipes to other processes"""
-    def __init__(self, shape=None, dtype=float, buffer=None, offset=0,
-                 strides=None, order=None):
-        if shape is None:
-            raise TypeError("Missing required argument 'shape'.")
-        if buffer is None:
-            raise TypeError("Missing required argument 'buffer'.")
-        self.shape = shape
-        self.dtype = dtype
-        self.buffer = buffer
-        self.offset = offset
-        self.strides = strides
-        self.order = order
-
-    def _reconnect(self, arrays):
-        """Reconstruct a 'full' version from this stub.
-        """
-        return _SharedNumpyArray(arrays, self.shape, self.dtype, self.buffer,
-                                 self.offset, self.strides, self.order)
-
-def _disconnect_shared_arrays(args, kwargs):
-    """Replaces _SharedNumpyArrays in 'args' and 'kwargs' with new stubs
-    """
-    args = tuple(a._disconnect()
-                 if isinstance(a, _SharedNumpyArray) else a
-                 for a in args)
-    kwargs = {k: v._disconnect()
-              if isinstance(v, _SharedNumpyArray) else v
-              for k, v in kwargs.items()}
-    return args, kwargs
-
-def _reconnect_shared_arrays(args, kwargs, shared_arrays):
-    """Replaces stubs in 'args' and 'kwargs' with new _SharedNumpyArrays
-    """
-    args = tuple(a._reconnect(shared_arrays)
-                 if isinstance(a, _SharedNumpyArrayStub) else a
-                 for a in args)
-    kwargs = {k: v._reconnect(shared_arrays)
-              if isinstance(v, _SharedNumpyArrayStub) else v
-              for k, v in kwargs.items()}
-    return args, kwargs
+    @staticmethod
+    def _unlink(shm):
+        try:
+            shm.unlink()
+        except FileNotFoundError:
+            pass ## must have already been called?
 
 # When an exception from a child process isn't handled by the parent
 # process, we'd like the parent to print the child traceback. Overriding
@@ -764,6 +715,7 @@ class _Tests():
             self._trial_slicing_of_shared_array(pm)
 
     def _trial_slicing_of_shared_array(self, pm):
+        import pickle
         ri = np.random.randint # Just to get short lines
         dtype = np.dtype(np.random.choice(
             [np.uint16, np.uint8, float, np.float32, np.float64]))
@@ -781,7 +733,7 @@ class _Tests():
         b = a[slicer] ## should be a view
         b.fill(1)
         expected_total = int(b.sum())
-        reloaded_total = b._disconnect()._reconnect(pm.shared_mp_arrays).sum()
+        reloaded_total = pickle.loads(pickle.dumps(b)).sum()
         assert expected_total == reloaded_total, \
             f'Failed {dtype.name}/{original_dimensions}/{slicer}'
 
@@ -1018,6 +970,42 @@ class _Tests():
             assert sorted(th_o) == th_o,\
                 f'Resource `{r}` was used out of order! -- {th_o}'
 
+    def test_indexing_views_of_views(self):
+        import pickle
+
+        pm = ProxyManager((int(1e9),))
+        ri = np.random.randint # Just to get short lines
+
+        original_dimensions = (3, 3, 3, 256, 256)
+        a = pm.shared_numpy_array(0, shape=original_dimensions, dtype='uint8')
+        c = ri(0, 255, original_dimensions, dtype='uint8')
+
+        assert not np.allclose(a, c), 'Shouldnt be equal yet'
+        a[:] = c # fill a with random values from 3
+        assert np.allclose(a, c), 'Should be equal not'
+
+        b = a[:, :, :, 8:, :] # create a view of a shared_numpy_array
+        d = c[:, :, :, 8:, :] # create a view of a normal numpy array
+        assert np.allclose(b, d), 'Views should be the same'
+        assert np.allclose(
+            b[0, :, 0, :, :],
+            d[0, :, 0, :, :]
+        ), 'Indexing into a view should be the same'
+
+        assert np.allclose(
+            pickle.loads(pickle.dumps(b)), d
+        ), 'Should be the same after disonnecting and reconnecting'
+
+        assert np.allclose(
+            pickle.loads(pickle.dumps(b))[0, :, 0, :, :],
+            d[0, :, 0, :, :]
+        ), 'Indexing into a reconnected array/view should be the same'
+
+        assert np.allclose(
+            pickle.loads(pickle.dumps(b[0, :, 0, :, :])),
+            d[0, :, 0, :, :]
+        ), 'We should be able to serialize/reload a view of a view'
+
     def run(self, test_prefix='test_'):
         tests = [i for i in dir(self) if i.startswith(test_prefix)]
         self.tests = len(tests)
@@ -1132,5 +1120,4 @@ class _DummyFileSaver(_DummyObject):
         return a
 
 if __name__ == '__main__':
-    test_prefix = 'test_proxy_with_lock_with_waitlist'
     _Tests().run('test_')
