@@ -32,9 +32,9 @@ def parse_tttr_header(filename, verbose=True, max_tags=1000):
         while True:
             # Read the tags. It seems like they're using little endian?
             tag_id = file.read(32).strip(b'\x00').decode('ascii')
-            # If the tag has a positive index, we've seen it before:
             tag_idx = int.from_bytes(
                 file.read(4), byteorder='little', signed=True)
+            # If the tag has a positive index, we've seen it before:
             if tag_idx not in (-1, 0): assert tag_id in tags
             # Tags store their info in a few different formats:
             tag_typecode = {
@@ -63,7 +63,7 @@ def parse_tttr_header(filename, verbose=True, max_tags=1000):
             else:
                 # Some simple tags safely convert:
                 if tag_typecode == 'Bool8':
-                    tag_value = (tag_value == (b'\x00' * 8))
+                    tag_value = (tag_value != (b'\x00' * 8))
                 if tag_typecode == 'Int8':
                     tag_value = int.from_bytes(
                         tag_value, byteorder='little', signed=True)
