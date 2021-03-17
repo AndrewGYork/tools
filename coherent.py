@@ -1,7 +1,5 @@
 import serial
 
-max_devices = 6
-
 class OBIS:
     def __init__(self,
                  which_port,
@@ -17,30 +15,19 @@ class OBIS:
         except serial.serialutil.SerialException:
             raise IOError('No connection to OBIS on port %s'%which_port)
         # Find devices
+        self.max_channels = 6
         self.names_to_channels = {}
-        for dev in range(max_devices): 
+        for ch in range(self.max_channels): 
             try:
-                self.get_device_identity(dev)
-                wavelength = self.get_wavelength(dev)
-                self.names_to_channels[wavelength.split('.')[0]] = dev
+                self.get_device_identity(ch)
+                wavelength = self._send('SYSTem%i:INFormation:WAVelength?'%ch)
+                self.names_to_channels[wavelength.split('.')[0]] = ch
             except OSError as e:
                 if e.args[0] not in (
                     'Controller error: Device unavailable',
                     'Controller error: Unrecognized command/query'):
                     raise
-        # Configure lasers
-        self.verbose = False # (set True for debugging)
-        self.power_setpoint_percent_min = {}
-        for laser in self.names_to_channels.keys(): 
-            self._set_CDRH_delay_status(False, laser) # Mandatory for enable
-            self._get_device_type(laser) # Determines operating mode options
-            self.set_operating_mode(operating_mode, laser) # Also disables laser
-            pwr_min = self._get_power_min_watts(laser) # Required attribute
-            pwr_max = self._get_power_rating_watts(laser) # Required attribute
-            self.power_setpoint_percent_min[self.n2c(laser)] = round(
-                (100 * pwr_min / pwr_max), 1) + 0.1 # + 0.1 to avoid round down
-            # add other attributes as needed
-        self.verbose = verbose
+        # Use nicknames for channels (if passed on init)
         if names_to_channels != None:
             for name, channel in names_to_channels.items():
                 assert channel in self.device_identities
@@ -50,9 +37,22 @@ class OBIS:
                                str(list(self.names_to_channels)) +
                                '\nValid channel names: '+
                                str(list(self.names_to_channels.values())))
+        # Configure lasers
+        self.verbose = False # (set True for debugging)
+        self.power_setpoint_percent_min = {}
+        for laser in self.lasers:
+            self._set_CDRH_delay_status(False, laser) # Mandatory for enable
+            self._get_device_type(laser) # Determines operating mode options
+            self.set_operating_mode(operating_mode, laser) # Also disables laser
+            pwr_min = self._get_power_min_watts(laser) # Required attribute
+            pwr_max = self._get_power_rating_watts(laser) # Required attribute
+            self.power_setpoint_percent_min[laser] = round(
+                (100 * pwr_min / pwr_max), 1) + 0.1 # + 0.1 to avoid round down
+            # add other attributes as needed
+        self.verbose = verbose
 
     def n2c(self, name_or_channel):
-        if name_or_channel in range(max_devices):
+        if name_or_channel in range(self.max_channels):
             return name_or_channel
         elif name_or_channel in self.names_to_channels:
             return self.names_to_channels[name_or_channel]
@@ -119,7 +119,7 @@ class OBIS:
         CDRH_delay_status = {'ON': True, 'OFF': False}[CDRH_delay_status]
         if not hasattr(self, 'CDRH_delay_status'):
             self.CDRH_delay_status = {}
-        self.CDRH_delay_status[channel] = CDRH_delay_status
+        self.CDRH_delay_status[name] = CDRH_delay_status
         if self.verbose:
             print('%s CDRH 5 second delay status:'%name,
                   CDRH_delay_status)
@@ -139,7 +139,7 @@ class OBIS:
         power_min_watts = float(self._send('SOURce%i:POWer:LIMit:LOW?'%channel))
         if not hasattr(self, 'power_min_watts'):
             self.power_min_watts = {}
-        self.power_min_watts[channel] = power_min_watts
+        self.power_min_watts[name] = power_min_watts
         if self.verbose:
             print('%s power minimum (watts):'%name, power_min_watts)
         return power_min_watts
@@ -150,7 +150,7 @@ class OBIS:
             self._send('SYSTem%i:INFormation:POWer?'%channel))
         if not hasattr(self, 'power_rating_watts'):
             self.power_rating_watts = {}
-        self.power_rating_watts[channel] = power_rating_watts
+        self.power_rating_watts[name] = power_rating_watts
         if self.verbose:
             print('%s power rating (watts):'%name, power_rating_watts)
         return power_rating_watts
@@ -160,20 +160,19 @@ class OBIS:
         device_type = self._send('SYSTem%i:INFormation:TYPe?'%channel)
         if not hasattr(self, 'device_types'):
             self.device_types = {}
-        self.device_types[channel] = device_type
+        self.device_types[name] = device_type
         if self.verbose:
             print('%s device type:'%name, device_type)
         return device_type
     
-    def get_device_identity(self, name=None):
-        channel = self.n2c(name)
+    def get_device_identity(self, channel=None): # channel for unknown ID (init)
+        channel = self.n2c(channel)
         device_identity = self._send('*IDN%i?'%channel)
         if not hasattr(self, 'device_identities'):
             self.device_identities = {}
         self.device_identities[channel] = device_identity
         if self.verbose:
-            if isinstance(name, int): print('Ch', end='')
-            print('%s device identity:'%name, device_identity)
+            print('Ch%s device identity:'%channel, device_identity)
         return device_identity
 
     def get_wavelength(self, name=None):
@@ -181,9 +180,8 @@ class OBIS:
         wavelength = self._send('SYSTem%i:INFormation:WAVelength?'%channel)
         if not hasattr(self, 'wavelengths'):
             self.wavelengths = {}
-        self.wavelengths[channel] = wavelength
+        self.wavelengths[name] = wavelength
         if self.verbose:
-            if isinstance(name, int): print('Ch', end='')
             print('%s wavelength (nm):'%name, wavelength)
         return wavelength
 
@@ -208,7 +206,7 @@ class OBIS:
             raise Exception('Unsupported operating mode %s'%operating_mode)
         if not hasattr(self, 'operating_mode'):
             self.operating_mode = {}
-        self.operating_mode[channel] = operating_mode
+        self.operating_mode[name] = operating_mode
         if self.verbose:
             print('%s operating mode:'%name, operating_mode)
         return operating_mode
@@ -220,9 +218,9 @@ class OBIS:
         if mode == 'CW-power': # power feedback with closed light-loop
             self._send('SOURce%i:AM:INTernal CWP'%channel, reply=False)
         elif mode == 'AO-power': # power feedback with closed light-loop
-            if self.device_types[channel] == 'DDL':
+            if self.device_types[name] == 'DDL':
                 self._send('SOURce%i:AM:EXTernal MIXSO'%channel, reply=False)
-            elif self.device_types[channel] == 'OPSL':
+            elif self.device_types[name] == 'OPSL':
                 self._send('SOURce%i:AM:EXTernal MIXed'%channel, reply=False)
         else:
             raise Exception('Unsupported operating mode %s'%mode)
@@ -235,12 +233,12 @@ class OBIS:
             'SOURce%i:POWer:LEVel:IMMediate:AMPLitude?'%channel))
         if not hasattr(self, 'power_setpoint_watts'):
             self.power_setpoint_watts = {}
-        self.power_setpoint_watts[channel] = power_setpoint_watts
+        self.power_setpoint_watts[name] = power_setpoint_watts
         power_setpoint_percent = round( # max .dp
-            (100 * power_setpoint_watts / self.power_rating_watts[channel]), 1)
+            (100 * power_setpoint_watts / self.power_rating_watts[name]), 1)
         if not hasattr(self, 'power_setpoint_percent'):
             self.power_setpoint_percent = {}
-        self.power_setpoint_percent[channel] = power_setpoint_percent
+        self.power_setpoint_percent[name] = power_setpoint_percent
         if self.verbose:
             print('%s power setpoint: %0.1f%% (%f watts)'%(
                 name, power_setpoint_percent, power_setpoint_watts))
@@ -249,18 +247,18 @@ class OBIS:
     def set_power_setpoint_percent(self, power_setpoint_percent, name=None):
         channel = self.n2c(name)
         if power_setpoint_percent == 'min':
-            power_setpoint_percent = self.power_setpoint_percent_min[channel]
+            power_setpoint_percent = self.power_setpoint_percent_min[name]
         else:
             assert isinstance(power_setpoint_percent, (int, float))
             assert 0 <= power_setpoint_percent <= 100
             power_setpoint_percent = round(power_setpoint_percent, 1) # max .dp
             if power_setpoint_percent < (
-                self.power_setpoint_percent_min[channel]):
+                self.power_setpoint_percent_min[name]):
                 raise Exception('Power setpoint percent %f < minimum (%f)'%(
                     power_setpoint_percent,
-                    self.power_setpoint_percent_min[channel]))
+                    self.power_setpoint_percent_min[name]))
         power_setpoint_watts = (
-            self.power_rating_watts[channel] * power_setpoint_percent / 100)
+            self.power_rating_watts[name] * power_setpoint_percent / 100)
         if self.very_verbose:
             print('Setting %s power setpoint to %0.1f%% (%f watts)'%(
                 name, power_setpoint_percent, power_setpoint_watts))
@@ -276,7 +274,7 @@ class OBIS:
         enabled_status = {'ON': True, 'OFF': False}[enabled_status]
         if not hasattr(self, 'enabled_status'):
             self.enabled_status = {}
-        self.enabled_status[channel] = enabled_status
+        self.enabled_status[name] = enabled_status
         if self.verbose:
             print('%s enabled status:'%name, enabled_status)
         return enabled_status
@@ -284,7 +282,7 @@ class OBIS:
     ### Turns laser ON!
     def set_enabled_status(self, enable, name=None):
         channel = self.n2c(name)
-        assert self.CDRH_delay_status[channel] == False # No 5 second delay!
+        assert self.CDRH_delay_status[name] == False # No 5 second delay!
         cmd = {True: 'ON', False: 'OFF'}[enable]
         if self.very_verbose:
             print('Setting %s enabled status to'%name, enable)
@@ -319,9 +317,10 @@ if __name__ == '__main__':
                      operating_mode='AO-power', # optional init to AO mode
                      verbose=True,
                      very_verbose=False)
-    # Make calls to single lasers or access attributes:
+    
+    # Call single lasers and access attributes:
     laser_box.get_wavelength('Red')
-    laser_box.wavelengths[laser_box.n2c('Red')]
+    laser_box.wavelengths['Red']
     
     # Loop over all lasers and test all methods:
     for laser in laser_box.lasers:
