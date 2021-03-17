@@ -561,6 +561,7 @@ class _SharedNumpyArray(np.ndarray):
         if shared_memory_name is None:
             dtype = np.dtype(dtype)
             requested_bytes = np.prod(shape, dtype='uint64') * dtype.itemsize
+            requested_bytes = int(requested_bytes) # SharedMemory need int on PC
             shm = shared_memory.SharedMemory(create=True, size=requested_bytes)
             atexit.register(lambda: _SharedNumpyArray._unlink(shm))
         else:
