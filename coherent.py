@@ -1,5 +1,16 @@
 import serial
 
+##    NOTE: The OBIS laser box will autostart the lasers when power cycled!
+##    This means that the lasers will emit if the key is switched 'ON' and
+##    the interlock is 'CLOSED' (as is typically the case).
+##    The 'Autostart OFF' commands (commented out) below are attempts to fix
+##    this behaviour but so far they have not worked.
+##    The calls to '_set_auto_start_status(False, laser)' seem to work at
+##    the level of a single laser? But are then overwritten by the laser box
+##    during a power cycle? The manual does not say.
+##    Once the laser box is powered up (and python has control) the box and
+##    lasers behave as expected.
+
 class OBIS:
     def __init__(self,
                  which_port,
@@ -14,6 +25,7 @@ class OBIS:
             self.port = serial.Serial(port=which_port, timeout=1)
         except serial.serialutil.SerialException:
             raise IOError('No connection to OBIS on port %s'%which_port)
+##        self._send('SYSTem0:AUTostart OFF', reply=False) # Autostart OFF?
         # Find devices
         self.max_channels = 6
         self.names_to_channels = {}
@@ -21,6 +33,7 @@ class OBIS:
             try:
                 self.get_device_identity(ch)
                 wavelength = self._send('SYSTem%i:INFormation:WAVelength?'%ch)
+##                self._send('Syst%i:Aut OFF'%ch, reply=False) # Autostart OFF?
                 self.names_to_channels[wavelength.split('.')[0]] = ch
             except OSError as e:
                 if e.args[0] not in (
@@ -42,6 +55,7 @@ class OBIS:
         self.power_setpoint_percent_min = {}
         for laser in self.lasers:
             self._set_CDRH_delay_status(False, laser) # Mandatory for enable
+            self._set_auto_start_status(False, laser) # Safety
             self._get_device_type(laser) # Determines operating mode options
             self.set_operating_mode(operating_mode, laser) # Also disables laser
             pwr_min = self._get_power_min_watts(laser) # Required attribute
@@ -111,6 +125,26 @@ class OBIS:
                 'ERR-900':'CCB message timed out',
                 }
             raise OSError('Controller error: ' + error_codes[ERR])
+        return None
+
+    def _get_auto_start_status(self, name=None):
+        channel = self.n2c(name)
+        auto_start_status = self._send('SYSTem%i:AUTostart?'%channel)
+        auto_start_status = {'ON': True, 'OFF': False}[auto_start_status]
+        if not hasattr(self, 'auto_start_status'):
+            self.auto_start_status = {}
+        self.auto_start_status[name] = auto_start_status
+        if self.verbose:
+            print('%s auto start status:'%name, auto_start_status)
+        return auto_start_status
+
+    def _set_auto_start_status(self, enable, name=None):
+        channel = self.n2c(name)
+        cmd = {True: 'ON', False: 'OFF'}[enable]
+        if self.very_verbose:
+            print('Setting %s auto start status to'%name, enable)
+        self._send('SYSTem%i:AUTostart '%channel + cmd, reply=False)
+        assert self._get_auto_start_status(name) == enable
         return None
 
     def _get_CDRH_delay_status(self, name=None):
@@ -304,7 +338,9 @@ class OBIS:
 
     def close(self):
         for laser in self.lasers:
-            self.set_enabled_status(False, laser)
+            self.set_operating_mode('AO-power', laser) # Also disables laser
+            self.set_power_setpoint_percent('min', laser)
+            self._set_auto_start_status(False, laser)
         if self.verbose: print('Closing OBIS COM port...', end='')
         self.port.close()
         if self.verbose: print('done.\n')
@@ -325,6 +361,7 @@ if __name__ == '__main__':
     # Loop over all lasers and test all methods:
     for laser in laser_box.lasers:
         # Atypical methods for main block:
+        laser_box._set_auto_start_status(False, laser)
         laser_box._set_CDRH_delay_status(False, laser) # setters call getters
         laser_box._get_power_min_watts(laser)
         laser_box._get_power_rating_watts(laser)
