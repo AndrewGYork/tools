@@ -1,28 +1,29 @@
 # Multiprocessing to spread CPU load, threading for concurrency:
 import multiprocessing as mp
-from multiprocessing import shared_memory
 import threading
 # Printing from a child process is tricky:
 import io
 from contextlib import redirect_stdout
-# Showing exceptions from a child process is tricky:
+# Handling exceptions from a child process/thread is tricky:
 import sys
 import traceback
+import inspect
 # Making sure a child process closes when the parent exits is tricky:
 import atexit
 import signal
 # Sharing memory between child processes is tricky:
-import ctypes as C
 try:
+    from multiprocessing import shared_memory
     import numpy as np
 except ImportError:
+    shared_memory = None
     np = None
 
 """
 Sometimes we put a computationally demanding Python object in a
 multiprocessing child process, but this usually leads to high mental
 overhead. Using pipes and queues for calling methods, getting/setting
-attributes, printing, handling exceptions, and cleanup can lean to ugly
+attributes, printing, handling exceptions, and cleanup can lead to ugly
 code and confusion. Can we isolate most of this mental overhead to this
 module? If we do it right, we'll be able to write fairly sophisticated
 code that's still fairly readable. Note that the following code is
@@ -31,24 +32,23 @@ effectively uncommented; can you still figure out what it's doing?
                 ####################################################
                 #  EXAMPLE CODE (copypaste into 'test.py' and run) #
                 ####################################################
-from proxy_objects import ProxyManager, launch_custody_thread
+from concurrency_tools import (
+    ObjectInSubprocess, CustodyThread, SharedNumpyArray)
 from dummy_module import Camera, Preprocessor, Display
 
 def main():
-    pm = ProxyManager(shared_memory_sizes=(10*2000*2000*2, # Two data buffers
-                                           10*2000*2000*2,
-                                            1*2000*2000*1, # Two display buffers
-                                            1*2000*2000*1))
-    data_buffers = [pm.shared_numpy_array(0, (10, 2000, 2000), 'uint16'),
-                    pm.shared_numpy_array(1, (10, 2000, 2000), 'uint16')]
-    display_buffers = [pm.shared_numpy_array(2, (2000, 2000), 'uint8'),
-                       pm.shared_numpy_array(3, (2000, 2000), 'uint8')]
+    data_buffers = [
+        SharedNumpyArray(shape=(10, 2000, 2000), dtype='uint16'),
+        SharedNumpyArray(shape=(10, 2000, 2000), dtype='uint16')]
+    display_buffers = [
+        SharedNumpyArray(shape=(2000, 2000), dtype='uint8'),
+        SharedNumpyArray(shape=(2000, 2000), dtype='uint8')]
 
-    camera = pm.proxy_object(Camera)
-    preprocessor = pm.proxy_object(Preprocessor)
-    display = pm.proxy_object(Display)
+    camera = ObjectInSubprocess(Camera)
+    preprocessor = ObjectInSubprocess(Preprocessor)
+    display = ObjectInSubprocess(Display)
 
-    def snap(data_buffer, display_buffer, custody):
+    def acquire_timelapse(data_buffer, display_buffer, custody):
         custody.switch_from(None, to=camera)
         camera.record(out=data_buffer)
 
@@ -61,12 +61,12 @@ def main():
         custody.switch_from(display, to=None)
 
     for i in range(15):
-        th0 = launch_custody_thread(target=snap, first_resource=camera,
-                            args=(data_buffers[0], display_buffers[0]))
+        th0 = CustodyThread(first_resource=camera, target=acquire_timelapse,
+                            args=(data_buffers[0], display_buffers[0])).start()
         if i > 0:
             th1.join()
-        th1 = launch_custody_thread(target=snap, first_resource=camera,
-                            args=(data_buffers[1], display_buffers[1]))
+        th1 = CustodyThread(first_resource=camera, target=acquire_timelapse,
+                            args=(data_buffers[1], display_buffers[1])).start()
         th0.join()
     th1.join()
 
@@ -96,16 +96,18 @@ instances of the Camera, Preprocessing, and Display objects actually
 live in child processes, communicate over pipes, and synchronize access
 to shared memory.
 
-Note that the method calls to our proxied object still block the parent
+Note that the method calls to our objects-in-subprocesses still block the parent
 process; the idea is, the parent process is now effectively IO-limited
 rather than CPU-limited, so we can write clean(er)-looking threading
 code in the parent if we want multiple things to happen at once in the
 parent.
 
-Also note that multiprocessing already has proxied objects via
-"managers"; we're rolling our own to learn, and have complete control.
-If at the end of the process, we don't like ours better, we'll switch to
-multiprocessing proxies.
+Also note that python's multiprocessing module already has
+objects-in-subprocesses via "managers", called "proxy objects", and the Pyro
+package (https://github.com/irmen/Pyro5) lets you "proxy" objects on different
+machines. We're rolling our own to learn, and have complete control. If at the
+end of the process, we don't like ours better, we'll switch to multiprocessing
+proxies or Pyro.
 
 CURRENT LIMITATIONS:
 
@@ -114,11 +116,11 @@ module, you have to protect the "entry point" of your program. The
 typical way to do this is by using an "if __name__ == '__main__':" block:
 
 import numpy as np
-from proxy_objects import ProxyObject
+from proxy_objects import ObjectInSubprocess
 from dummy_module import Display
 
 def main():
-    disp = ProxyObject(Display)
+    disp = ObjectInSubprocess(Display)
     image = np.random.random((2000 2000))
     disp.show(image)
 
@@ -126,49 +128,228 @@ if __name__ == '__main__':
     main()
 """
 
-class ProxyManager:
-    """Allocates shared memory and spawns proxy objects
+class SharedNumpyArray(np.ndarray):
+    """A numpy array that lives in shared memory
 
-    If you want your ProxyObjects to share memory with the parent
-    process (and each other), allocate a ProxyManager first, and use it
-    to spawn your ProxyObjects.
+    Inputs and outputs to/from ObjectInSubprocess are 'serialized', which
+    is pretty fast - except for large in-memory objects. The only large
+    in-memory objects we regularly deal with are numpy arrays, so it
+    makes sense to provide a way to pass large numpy arrays via shared memory
+    (which avoids slow serialization).
+
+    Maybe you wanted to write code that looks like this:
+
+        data_buf = np.zeros((400, 2000, 2000), dtype='uint16')
+        display_buf = np.zeros((2000, 2000), dtype='uint8')
+
+        camera = Camera()
+        preprocessor = Preprocessor()
+        display = Display()
+
+        camera.record(num_images=400, out=data_buf)
+        preprocessor.process(in=data_buf, out=display_buf)
+        display.show(display_buf)
+
+    ...but instead you write code that looks like this:
+
+        data_buf = SharedNumpyArray(shape=(400, 2000, 2000), dtype='uint16')
+        display_buf = SharedNumpyArray(shape=(2000, 2000), dtype='uint8')
+
+        camera = ObjectInSubprocess(Camera)
+        preprocessor = ObjectInSubprocess(Preprocessor)
+        display = ObjectInSubprocess(Display)
+
+        camera.record(num_images=400, out=data_buf)
+        preprocessor.process(in=data_buf, out=display_buf)
+        display.show(display_buf)
+
+    ...and your payoff is, each object gets its own CPU core, AND passing
+    large numpy arrays between the processes is still really fast!
     """
-    def __init__(self, shared_memory_sizes=tuple()):
-        """Allocate shared memory as multiprocessing Arrays.
+    def __new__(cls, shape=None, dtype=float, shared_memory_name=None,
+                offset=0, strides=None, order=None):
+        if shared_memory_name is None:
+            dtype = np.dtype(dtype)
+            requested_bytes = np.prod(shape, dtype='uint64') * dtype.itemsize
+            requested_bytes = int(requested_bytes) #
+            shm = shared_memory.SharedMemory(create=True, size=requested_bytes)
+            atexit.register(lambda: SharedNumpyArray._unlink(shm))
+        else:
+            shm = shared_memory.SharedMemory(
+                name=shared_memory_name, create=False)
+        obj = super(SharedNumpyArray, cls).__new__(
+            cls, shape, dtype, shm.buf, offset, strides, order)
+        obj.shared_memory = shm
+        obj.offset = offset
+        return obj
+
+    def __array_finalize__(self, obj):
+        if obj is None:
+            return
+        if not isinstance(obj, SharedNumpyArray):
+            raise ValueError(
+                "You can't view non-shared memory as shared memory.")
+        self.shared_memory = obj.shared_memory
+        self.offset = obj.offset
+        self.offset += (self.__array_interface__['data'][0] -
+                         obj.__array_interface__['data'][0])
+
+    def __reduce__(self):
+        args = (
+            self.shape, self.dtype, self.shared_memory.name, self.offset,
+            self.strides, None)
+        return (SharedNumpyArray, args)
+
+    @staticmethod
+    def _unlink(shm):
+        try:
+            shm.unlink()
+        except FileNotFoundError:
+            pass ## must have already been called?
+
+class ResultThread(threading.Thread):
+    """threading.Thread with all the simple features we wish it had.
+
+    We added a 'get_result' method that returns values/raises exceptions.
+
+    We changed the return value of 'start' from 'None' to 'self' -- just to
+    trivially save us a line of code when launching threads.
+
+    Example:
+    ```
+        def f(a):
+            ''' A function that does something... '''
+            return a.sum()
+
+        ##
+        ## Getting Results:
+        ##
+        a = np.ones((2,), dtype='uint8')
+
+        # Our problem:
+        th = threading.Thread(target=f, args=(a,))
+        th.start()
+        th.join() # We can't access the result of f(a) without redefining f!
+
+        # Our solution:
+        res_th = ResultThread(target=f, args=(a,)).start()
+        res = res_th.get_result() # returns f(a)
+        assert res == 2
+
+        ##
+        ## Error handling
+        ##
+        a = 1
+
+        # Our problem:
+        th = threading.Thread(target=f, args=(a,))
+        th.start()
+        th.join()
+        # f(a) raised an unhandled exception. Our parent thread has no idea!
+
+        # Our solution:
+        res_th = ResultThread(target=f, args=(a,)).start()
+        try:
+            res = res_th.get_result()
+        except AttributeError:
+            print("AttributeError was raised in thread!")
+        else:
+            raise AssertionError(
+                'We expected an AttributeError to be raised on join!')
+
+        # Unhandled exceptions raised during evaluation of 'f' are reraised in
+        # the parent thread when you call 'get_result'.
+        # Tracebacks may print to STDERR when the exception occurs in
+        # the child thread, but don't affect the parent thread (yet).
+    ```
+    NOTE: This module modifies threading.excepthook. You can't just copy/paste
+    this class definition and expect it to work.
+    """
+    def __init__(self, group=None, target=None, name=None, args=(),
+                 kwargs=None):
+        super().__init__(group, target, name, args, kwargs)
+        self._return = None
+
+    def run(self):
+        if self._target is not None:
+            self._return = self._target(*self._args, **self._kwargs)
+
+    def start(self):
+        try:
+            super().start()
+        except RuntimeError as e:
+            if e.args == ("can't start new thread",):
+                print('*'*80)
+                print('Failed to launch a thread.')
+                print(threading.active_count(), 'threads are currently active.')
+                print('You might have reached a limit of your system;')
+                print('let some of your threads finish before launching more.')
+                print('*'*80)
+            raise
+        return self
+
+    def get_result(self, timeout=None):
+        """ Either returns a value or raises an exception.
+
+        Optionally accepts a timeout in seconds. If thread has not returned
+        after timeout seconds, raises a TimeoutError.
         """
-        if np is None:
-            raise ImportError("We failed to import Numpy," +
-                              " so there's no point using a ProxyManager.")
-        self.shared_mp_arrays = tuple(mp.Array(C.c_uint8, sz)
-                                      for sz in shared_memory_sizes)
+        super().join(timeout=timeout)
+        if self.is_alive(): ## Thread could potentially not be done yet!
+            return TimeoutError('Thread did not return!')
+        if hasattr(self, 'exc_value'):
+            raise self.exc_value
+        return self._return
 
-    def proxy_object(
-        self,
-        initializer,
-        *initargs,
-        custom_loop=None,
-        **initkwargs
-        ):
-        """Spawn a ProxyObject that has access to shared memory.
-        """
-        return ProxyObject(initializer, *initargs, **initkwargs,
-                           custom_loop=custom_loop,
-                           shared_mp_arrays=self.shared_mp_arrays)
+class CustodyThread(ResultThread):
+    """Threads that can access shared resources in the order they were launched.
 
-    def shared_numpy_array(self, which_mp_array, shape, dtype=np.uint8):
-        """View some of our shared memory as a numpy array.
+    See the docstring at the top of this module for examples.
+    """
+    def __init__(self, first_resource=None,
+                 group=None, target=None, name=None, args=(), kwargs=None):
+        if 'custody' not in inspect.signature(target).parameters:
+            raise ValueError("The function 'target' passed to a CustodyThread"
+            " must accept an argument named 'custody'")
+        custody = _Custody() # Useful for synchronization in the launched thread
+        if first_resource is not None:
+            # Get in line for custody of the first resource the launched
+            # thread will use, but don't *wait* in that line; the launched
+            # thread should do the waiting, not the main thread:
+            custody.switch_from(None, first_resource, wait=False)
+        if kwargs is None: kwargs = {}
+        if 'custody' in kwargs:
+            raise ValueError(
+                "CustodyThread will create and pass a keyword argument to"
+                " 'target' named 'custody', so keyword arguments to a"
+                " CustodyThread can't be named 'custody'")
+        kwargs['custody'] = custody
+        super().__init__(group, target, name, args, kwargs)
+        self.custody = custody
 
-        You can pass these shared numpy arrays to and from ProxyObjects
-        without (slow) serialization.
-        """
-        return _SharedNumpyArray(shape=shape, dtype=dtype)
+_original_threading_excepthook = threading.excepthook
 
-class ProxyObject:
+def _my_threading_excepthook(args):
+    """Show a traceback when a child exception isn't handled by the parent.
+    """
+    if isinstance(args.thread, ResultThread):
+        args.thread.exc_value = args.exc_value
+        args.thread.exc_traceback = args.exc_traceback
+        args.thread.exc_type = args.exc_type
+    else:
+        _try_to_print_child_traceback(args.exc_value)
+    return _original_threading_excepthook(args)
+
+threading.excepthook = _my_threading_excepthook
+
+FancyThread = ResultThread # So Andy can refer to it like this.
+PoliteThread = CustodyThread
+
+class ObjectInSubprocess:
     def __init__(
         self,
         initializer,
         *initargs,
-        shared_mp_arrays=tuple(),
         custom_loop=None,
         close_method_name=None,
         closeargs=None,
@@ -177,16 +358,19 @@ class ProxyObject:
         ):
         """Make an object in a child process, that acts like it isn't.
 
-        As much as possible, we try to make instances of ProxyObject
-        behave as if they're an instance of the proxied object living in
-        the parent process. They're not, of course: they live in a child
-        process. If you have spare cores on your machine, this turns
-        CPU-bound operations into IO-bound operations, without too much
-        mental overhead for the coder.
+        As much as possible, we try to make instances of ObjectInSubprocess
+        behave as if they're an instance of the object living in the parent
+        process. They're not, of course: they live in a child process. If you
+        have spare cores on your machine, this turns CPU-bound operations
+        (which  threading can't parallelize) into IO-bound operations (which
+        threading CAN parallelize),  without too much mental overhead for the
+        coder.
 
-        initializer -- callable that returns an instance of a Python object.
-        initargs, initkwargs --  Arguments to 'initializer'
-        shared_mp_arrays -- Used by a ProxyManager to pass in shared memory.
+        initializer -- callable that returns an instance of a Python object
+        initargs, initkwargs --  arguments to 'initializer'
+        close_method_name -- string, optional, name of our object's method to
+            be called automatically when the child process exits
+        closeargs, closekwargs -- arguments to 'close_method'
         """
         # Put an instance of the Python object returned by 'initializer'
         # in a child process:
@@ -195,19 +379,16 @@ class ProxyObject:
         child_process = mp.Process(
             target=child_loop,
             name=initializer.__name__,
-            args=(child_pipe, shared_mp_arrays,
-                  initializer, initargs, initkwargs,
+            args=(child_pipe, initializer, initargs, initkwargs,
                   close_method_name, closeargs, closekwargs))
-        # Attribute-setting looks weird here because we override
-        # __setattr__, and because we use a dummy object's namespace to
-        # hold our attributes so we shadow as little of the proxied
-        # object's namespace as possible:
+        # Attribute-setting looks weird here because we override __setattr__,
+        # and because we use a dummy object's namespace to hold our attributes
+        # so we shadow as little of the object's namespace as possible:
         super().__setattr__('_', _DummyClass()) # Weird, but for a reason.
         self._.parent_pipe = parent_pipe
-        self._.parent_pipe_lock = _ProxyObjectPipeLock()
+        self._.parent_pipe_lock = _ObjectInSubprocessPipeLock()
         self._.child_pipe = child_pipe
         self._.child_process = child_process
-        self._.shared_mp_arrays = shared_mp_arrays
         self._.waiting_list = _WaitingList()
         # Make sure the child process initialized successfully:
         with self._.parent_pipe_lock:
@@ -217,7 +398,7 @@ class ProxyObject:
         atexit.register(lambda: _close(self))
         try:
             signal.signal(signal.SIGTERM, lambda s, f: _close(self))
-        except ValueError: # We are probably starting from  a thread.
+        except ValueError: # We are probably starting from a thread.
             pass # Signal handling can only happen from main thread
 
     def __getattr__(self, name):
@@ -246,45 +427,42 @@ class ProxyObject:
     def __del__(self):
         _close(self)
 
-def _get_response(proxy_object):
-    """Effectively a method of ProxyObject, but defined externally to
-    minimize shadowing of the proxied object's namespace"""
-    resp, printed_output = proxy_object._.parent_pipe.recv()
+def _get_response(object_in_subprocess):
+    """Effectively a method of ObjectInSubprocess, but defined externally to
+    minimize shadowing of the object's namespace"""
+    resp, printed_output = object_in_subprocess._.parent_pipe.recv()
     if len(printed_output) > 0:
         print(printed_output, end='')
     if isinstance(resp, Exception):
         raise resp
     return resp
 
-def _close(proxy_object):
-    """Effectively a method of ProxyObject, but defined externally to
-    minimize shadowing of the proxied object's namespace"""
-    if not proxy_object._.child_process.is_alive():
+def _close(object_in_subprocess):
+    """Effectively a method of ObjectInSubprocess, but defined externally to
+    minimize shadowing of the object's namespace"""
+    if not object_in_subprocess._.child_process.is_alive():
         return
-    with proxy_object._.parent_pipe_lock:
-        # TODO? Try/except to handle broken pipes?
-        proxy_object._.parent_pipe.send(None)
-        proxy_object._.child_process.join()
-        proxy_object._.parent_pipe.close()
+    with object_in_subprocess._.parent_pipe_lock:
+        object_in_subprocess._.parent_pipe.send(None)
+        object_in_subprocess._.child_process.join()
+        object_in_subprocess._.parent_pipe.close()
 
-def _child_loop(child_pipe, shared_arrays,
-                initializer, initargs, initkwargs,
+def _child_loop(child_pipe, initializer, initargs, initkwargs,
                 close_method_name, closeargs, closekwargs):
-    """The event loop of a ProxyObject's child process
+    """The event loop of a ObjectInSubprocess's child process
     """
     # Initialization.
     printed_output = io.StringIO()
     try: # Create an instance of our object...
         with redirect_stdout(printed_output):
             obj = initializer(*initargs, **initkwargs)
-            # TODO default to "close" if it exists?
             if close_method_name is not None:
                 close_method = getattr(obj, close_method_name)
                 closeargs = tuple() if closeargs is None else closeargs
                 closekwargs = dict() if closekwargs is None else closekwargs
                 atexit.register(lambda: close_method(*closeargs, **closekwargs))
-                # TODO - what happens to print statements? Are they guaranteed
-                # to print in the main process?
+                # Note: We don't know if print statements in the close method
+                # will print in the main process.
         child_pipe.send(('Successfully initialized', printed_output.getvalue()))
     except Exception as e: # If we fail to initialize, just give up.
         e.child_traceback_string = traceback.format_exc()
@@ -322,7 +500,7 @@ def _dummy_function():
 class _WaitingList:
     """For synchronization of one-thread-at-a-time shared resources
 
-    Each ProxyObject has a _WaitingList; if you want to define your own
+    Each ObjectInSubprocess has a _WaitingList; if you want to define your own
     _WaitingList-like objects that can interact with
     _Custody.switch_from() and _Custody._wait_in_line(), make sure they have
     a waiting_list = [] attribute, and a waiting_list_lock =
@@ -339,7 +517,7 @@ class _WaitingList:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.waiting_list_lock.release()
 
-class _ProxyObjectPipeLock:
+class _ObjectInSubprocessPipeLock:
     '''Raises an educational exception (rather than blocking) when you try
        to acquire a locked lock.'''
     def __init__(self):
@@ -348,10 +526,10 @@ class _ProxyObjectPipeLock:
     def __enter__(self):
         if not self.lock.acquire(blocking=False):
             raise RuntimeError(
-                "Two different threads tried to use the same ProxyObject " +
-                "at the same time! This is bad. Look at the docstring of " +
-                "proxy_objects.py to see an example of how to use a _Custody " +
-                "object to avoid this problem.")
+                "Two different threads tried to use the same "
+                "ObjectInSubprocess at the same time! This is bad. Look at the "
+                "docstring of object_in_subprocess.py to see an example of how "
+                "to use a _Custody object to avoid this problem.")
         return self.lock
 
     def __exit__(self, exc_type, exc_val, exc_tb):
@@ -362,11 +540,11 @@ threading_lock_type = type(threading.Lock()) # Used for typechecking
 def _get_list_and_lock(resource):
     """Convenience function.
 
-    Expected input: A ProxyObject, a _WaitingList, or a
+    Expected input: An ObjectInSubprocess, a _WaitingList, or a
     _WaitingList-like object with 'waiting_list' and
     'waiting_list_lock' attributes.
     """
-    if isinstance(resource, ProxyObject):
+    if isinstance(resource, ObjectInSubprocess):
         waiting_list = resource._.waiting_list.waiting_list
         waiting_list_lock = resource._.waiting_list.waiting_list_lock
     else: # Either a _WaitingList, or a good enough impression
@@ -375,72 +553,13 @@ def _get_list_and_lock(resource):
     assert isinstance(waiting_list_lock, threading_lock_type)
     return waiting_list, waiting_list_lock
 
-def launch_custody_thread(target, first_resource=None, args=(), kwargs=None):
-    """A thin wrapper around threading.Thread(), useful for ProxyObjects
-
-    Along with ProxyManager (and maybe ProxyObject), this is one of the
-    few definitions from this module you should call directly. See the
-    docstring at the top of this module for an example of usage.
-
-    The 'target' function must accept a 'custody' keyword argument (an
-    instance of _Custody()), which will be used to call
-    'custody.switch_from()' (and 'custody._wait_in_line()').
-
-    'first_resource' is an instance of ProxyObject, _WaitingList,
-    or a _WaitingList-like object. The 'target' function is
-    expected to call custody.switch_from(None, first_resource) almost
-    immediately (waiting in line until the shared resource is available).
-    """
-    if kwargs is None: kwargs = {}
-    custody = _Custody() # Useful for synchronization in the launched thread
-    if first_resource is not None:
-        # Get in line for custody of the first resource the launched
-        # thread will use, but don't *wait* in that line; the launched
-        # thread should do the waiting, not the main thread:
-        custody.switch_from(None, first_resource, wait=False)
-    kwargs['custody'] = custody
-    thread = launch_thread(target, args, kwargs)
-    thread.custody = custody
-    return thread
-
-def launch_thread(target, args=(), kwargs=None):
-    """A thin wrapper around thread.Thread(), useful for ProxyObjects.
-
-    Along with ProxyManager (and maybe ProxyObject), this is one of the
-    few definitions from this module you should call directly. See the
-    docstring at the top of this module for an example of usage.
-
-    If your thread will acquire/release custody of a ProxyObject, use
-    `launch_custody_thread` instead. Use this function to create a thread
-    (instead of threading.Thread) when you feel like you need to launch another
-    thread within a custody thread.
-
-    The main purpose of this thread is so that the resulting thread can raise an
-    exception when 'join' is called to detect if an error occoured in the
-    threaded process.
-    """
-    if kwargs is None: kwargs = {}
-    thread = _RaiseOnJoinThread(target=target, args=args, kwargs=kwargs)
-    try:
-        thread.start()
-    except RuntimeError as e:
-        if e.args == ("can't start new thread",):
-            print('*'*80)
-            print('Failed to launch a custody thread.')
-            print(threading.active_count(), 'threads are currently active.')
-            print('You might have reached a limit of your system;')
-            print('let some of your threads finish before launching more.')
-            print('*'*80)
-        raise
-    return thread
-
 class _Custody:
     def __init__(self):
         """For synchronization of single-thread-at-a-time shared resources.
 
         See the docstring at the start of this module for example usage.
         For _Custody() to be useful, at least some of the objects
-        accessed by your launched thread must be ProxyObject()s,
+        accessed by your launched thread must be ObjectInSubprocess()s,
         _WaitingList()s, or _WaitingList-like objects.
         """
         self.permission_slip = threading.Lock()
@@ -505,101 +624,6 @@ class _Custody:
         self.permission_slip.acquire() # Blocks if we're not first in line
         self.has_custody = True
 
-class _SharedNumpyArray(np.ndarray):
-    """A numpy array that lives in shared memory
-
-    In general, don't create these directly, create _SharedNumpyArrays
-    (and ProxyObjects that use them) through calls to an instance of
-    ProxyManager.
-
-    Inputs and outputs to/from proxied objects are 'serialized', which
-    is pretty fast - except for large in-memory objects. The only large
-    in-memory objects we regularly deal with are numpy arrays, so it
-    makes sense to provide a way to pass large numpy arrays to and from
-    proxied objects via shared memory (which avoids slow serialization).
-
-    There's a straightforward recipe to do this: declare an mp.Array in
-    the parent process, pass it to the initializer of the child process,
-    and view it as a numpy array with np.frombuffer in both parent and
-    child. This works great, but breaks our ability to treat proxied
-    objects as if they are in the parent process, and the resulting code
-    can get pretty crazy looking.
-
-    _SharedNumpyArray is a compromise: maybe you wanted to write code that
-    looks like this:
-
-        data_buf = np.zeros((400, 2000, 2000), dtype='uint16')
-        display_buf = np.zeros((2000, 2000), dtype='uint8')
-
-        camera = Camera()
-        preprocessor = Preprocessor()
-        display = Display()
-
-        camera.record(num_images=400, out=data_buf)
-        preprocessor.process(in=data_buf, out=display_buf)
-        display.show(display_buf)
-
-    ...but instead you write code that looks like this:
-
-        pm = ProxyManager(shared_memory_sizes=(400*2000*2000*2, 2000*2000))
-        data_buf = pm.shared_numpy_array(0, (400, 2000, 2000), dtype='uint16')
-        display_buf = pm.shared_numpy_array(1, (2000, 2000), dtype='uint8')
-
-        camera = pm.proxy_object(Camera)
-        preprocessor = pm.proxy_object(Preprocessor)
-        display = pm.proxy_object(Display)
-
-        camera.record(num_images=400, out=data_buf)
-        preprocessor.process(in=data_buf, out=display_buf)
-        display.show(display_buf)
-
-    ...and your payoff is, each object gets its own CPU core, AND passing
-    large numpy arrays between the processes is still really fast!
-    """
-    def __new__(cls, shape=None, dtype=float, shared_memory_name=None,
-                offset=0, strides=None, order=None):
-        if shared_memory_name is None:
-            dtype = np.dtype(dtype)
-            requested_bytes = np.prod(shape, dtype='uint64') * dtype.itemsize
-            requested_bytes = int(requested_bytes) # SharedMemory need int on PC
-            shm = shared_memory.SharedMemory(create=True, size=requested_bytes)
-            atexit.register(lambda: _SharedNumpyArray._unlink(shm))
-        else:
-            shm = shared_memory.SharedMemory(
-                name=shared_memory_name, create=False)
-        obj = super(_SharedNumpyArray, cls).__new__(
-            cls, shape, dtype, shm.buf, offset, strides, order)
-        obj.shared_memory = shm
-        obj.offset = offset
-        return obj
-
-    def __array_finalize__(self, obj):
-        if obj is None:
-            return
-        if not isinstance(obj, _SharedNumpyArray):
-            raise ValueError(
-                "You can't view non-shared memory as shared memory.")
-        self.shared_memory = obj.shared_memory
-        self.offset = obj.offset
-        self.offset += (self.__array_interface__['data'][0] -
-                         obj.__array_interface__['data'][0])
-
-    def __reduce__(self):
-        args = (
-            self.shape, self.dtype, self.shared_memory.name, self.offset,
-            self.strides, None)
-        return (_SharedNumpyArray, args)
-
-    # def __del__(self):
-        # self.shared_memory.close()
-
-    @staticmethod
-    def _unlink(shm):
-        try:
-            shm.unlink()
-        except FileNotFoundError:
-            pass ## must have already been called?
-
 # When an exception from a child process isn't handled by the parent
 # process, we'd like the parent to print the child traceback. Overriding
 # sys.excepthook and threading.excepthook seems to be the standard way
@@ -618,27 +642,6 @@ def _my_excepthook(t, v, tb):
     return sys.__excepthook__(t, v, tb)
 
 sys.excepthook = _my_excepthook
-
-class _RaiseOnJoinThread(threading.Thread):
-    def join(self, timeout=None):
-        super().join(timeout=timeout)
-        if hasattr(self, 'exc_value'):
-            raise self.exc_value
-
-_original_threading_excepthook = threading.excepthook
-
-def _my_threading_excepthook(args):
-    """Show a traceback when a child exception isn't handled by the parent.
-    """
-    if isinstance(args.thread, _RaiseOnJoinThread):
-        args.thread.exc_value = args.exc_value
-        args.thread.exc_traceback = args.exc_traceback
-        args.thread.exc_type = args.exc_type
-    else:
-        _try_to_print_child_traceback(args.exc_value)
-    return _original_threading_excepthook(args)
-
-threading.excepthook = _my_threading_excepthook
 
 # Multiprocessing code works fairly differently depending whether you
 # use 'spawn' or 'fork'. Since 'spawn' seems to be available on every
@@ -660,6 +663,7 @@ class _Tests():
     of a larger group.
     '''
     class TestClass:
+        """Toy class that can be pout in a subprocess for testing """
         def __init__(self, *args, **kwargs):
             for k, v in kwargs.items():
                 setattr(self, k, v)
@@ -680,7 +684,7 @@ class _Tests():
             return shared_numpy_array.shape
 
         def test_shared_numpy_return(self, shape=(5,5)):
-            return _SharedNumpyArray(shape=shape)
+            return SharedNumpyArray(shape=shape)
 
         def test_modify_array(self, a):
             a.fill(1)
@@ -703,19 +707,14 @@ class _Tests():
         self.tests = 0
         self.passed = 0
 
-    def test_create_proxy_manager(self):
-        pm = ProxyManager((100, 100))
-
-    def test_create_proxy_object(self):
-        pm = ProxyManager((100, 100))
-        proxy_obj = pm.proxy_object(_Tests.TestClass)
+    def test_create_object_in_subprocess(self):
+        object_in_subprocess = ObjectInSubprocess(_Tests.TestClass)
 
     def test_reconnnecting_and_disconnecting_views(self):
-        pm = ProxyManager((int(1e9),))
         for i in range(1000):
-            self._trial_slicing_of_shared_array(pm)
+            self._trial_slicing_of_shared_array()
 
-    def _trial_slicing_of_shared_array(self, pm):
+    def _trial_slicing_of_shared_array(self):
         import pickle
         ri = np.random.randint # Just to get short lines
         dtype = np.dtype(np.random.choice(
@@ -729,7 +728,7 @@ class _Tests():
                 ri(1, min(6, a))
                 )
             for a in original_dimensions)
-        a = pm.shared_numpy_array(0, shape=original_dimensions, dtype=dtype)
+        a = SharedNumpyArray(shape=original_dimensions, dtype=dtype)
         a.fill(0)
         b = a[slicer] ## should be a view
         b.fill(1)
@@ -742,33 +741,31 @@ class _Tests():
         shape = (10, 10)
         dtype = int
         sz = int(np.prod(shape, dtype='uint64')*np.dtype(int).itemsize)
-        pm = ProxyManager((sz, sz))
         a = np.zeros(shape, dtype)
-        object_with_shared_memory = pm.proxy_object(_Tests.TestClass)
+        object_with_shared_memory = ObjectInSubprocess(_Tests.TestClass)
         object_with_shared_memory.test_shared_numpy_input(a)
 
     def test_passing_retrieving_shared_array(self):
         shape = (10, 10)
         dtype = int
         sz = int(np.prod(shape, dtype='uint64')*np.dtype(int).itemsize)
-        pm = ProxyManager((sz, sz))
-        object_with_shared_memory = pm.proxy_object(_Tests.TestClass)
-        a = pm.shared_numpy_array(which_mp_array=0, shape=shape, dtype=dtype)
+        object_with_shared_memory = ObjectInSubprocess(_Tests.TestClass)
+        a = SharedNumpyArray(shape=shape, dtype=dtype)
         a.fill(0)
         a = object_with_shared_memory.test_modify_array(a)
         assert a.sum() == np.product(shape, dtype='uint64'), (
             'Contents of array not correct!')
 
     def test_raise_attribute_error(self):
-        a = ProxyObject(_Tests.TestClass, 'attribute', x=4,)
+        a = ObjectInSubprocess(_Tests.TestClass, 'attribute', x=4,)
         try:
             a.z
         except AttributeError as e: # Get __this__ specific error
             print("Attribute error handled by parent process:\n ", e)
 
     def test_printing_in_child_process(self):
-        a = ProxyObject(_Tests.TestClass, 'attribute', x=4,)
-        b = ProxyObject(_Tests.TestClass, x=5)
+        a = ObjectInSubprocess(_Tests.TestClass, 'attribute', x=4,)
+        b = ObjectInSubprocess(_Tests.TestClass, x=5)
         b.printing_method('Hello')
         a.printing_method('A')
         a.printing_method('Hello', 'world', end='', flush=True)
@@ -778,22 +775,22 @@ class _Tests():
         expected_output = 'Hello\nA\nHello world\n4 ... 5\n'
         return expected_output
 
-    def test_setting_attribute_of_proxy(self):
-        a = ProxyObject(_Tests.TestClass, 'attribute', x=4,)
+    def test_setting_attribute_of_object_in_subprocess(self):
+        a = ObjectInSubprocess(_Tests.TestClass, 'attribute', x=4,)
         a.z = 10
         assert a.z == 10
         setattr(a, 'z', 100)
         assert a.z == 100
 
-    def test_getting_attribute_of_proxy(self):
-        a = ProxyObject(_Tests.TestClass, 'attribute', x=4)
+    def test_getting_attribute_of_object_in_subprocess(self):
+        a = ObjectInSubprocess(_Tests.TestClass, 'attribute', x=4)
         assert a.x == 4
         assert getattr(a, 'x') == 4
 
-    def test_proxy_object_overhead(self):
-        print('Performace summary:')
+    def test_object_in_subprocess_overhead(self):
+        print('Performance summary:')
         n_loops = 10000
-        a = ProxyObject(_Tests.TestClass, 'attribute', x=4,)
+        a = ObjectInSubprocess(_Tests.TestClass, 'attribute', x=4,)
         t = self.time_it(
             n_loops, a.test_method, timeout_us=100, name='Trivial method call')
         print(f" {t:.2f} \u03BCs per trivial method call.")
@@ -822,12 +819,11 @@ class _Tests():
     def _test_array_passing(self, pass_by, method_name, shape, dtype, n_loops):
         dtype = np.dtype(dtype)
         sz = int(np.prod(shape, dtype='uint64')*np.dtype(int).itemsize)
-        pm = ProxyManager((sz, sz))
         direction = '<->' if method_name == 'test_modify_array' else '->'
         name = f'{shape} array {direction} {pass_by}'
-        object_with_shared_memory = pm.proxy_object(_Tests.TestClass)
+        object_with_shared_memory = ObjectInSubprocess(_Tests.TestClass)
         if pass_by == 'reference':
-            a = pm.shared_numpy_array(0, shape, dtype=dtype)
+            a = SharedNumpyArray(shape, dtype=dtype)
             timeout_us = 5e3
         elif pass_by == 'serialization':
             a = np.zeros(shape=shape, dtype=dtype)
@@ -878,9 +874,10 @@ class _Tests():
                      for n in order.keys()}
         threads = []
         for i in range(num_snaps):
-            threads.append(launch_custody_thread(snap, camera_lock, args=(i,)))
+            threads.append(CustodyThread(
+                target=snap, first_resource=camera_lock, args=(i,)).start())
         for th in threads:
-            th.join()
+            th.get_result()
 
         if not tqdm is None:
             for pb in pbars.values(): pb.close()
@@ -890,7 +887,7 @@ class _Tests():
 
     def test_incorrect_thread_management(self):
 
-        p = ProxyObject(_Tests.TestClass)
+        p = ObjectInSubprocess(_Tests.TestClass)
         p.x = 5
         exceptions = [1]
         def t():
@@ -906,7 +903,7 @@ class _Tests():
             raise UserWarning('No exceptions raised.'
                               'Expected some RuntimeErrors')
 
-    def test_proxy_with_lock_with_waitlist(self):
+    def test_object_with_lock_with_waitlist(self):
         import time
         try:
             from tqdm import tqdm
@@ -934,13 +931,13 @@ class _Tests():
         NUM_STEPS = 4 # matches the number of steps for check results.
         num_snaps = 30  # Number of threads to start
 
-        # Create proxy objects of resources to use.
-        # Each has a method that sleep for some ammount of time and
+        # Create objects in subprocesses that are mocked resources to use.
+        # Each has a method that sleep for some amount of time and
         # returns `True`.
-        camera = ProxyObject(_DummyCamera, name='camera')
-        processor = ProxyObject(_DummyProcessor, name='processor')
-        display = ProxyObject(_DummyGUI, name='display')
-        disk = ProxyObject(_DummyFileSaver, name='disk')
+        camera = ObjectInSubprocess(_DummyCamera, name='camera')
+        processor = ObjectInSubprocess(_DummyProcessor, name='processor')
+        display = ObjectInSubprocess(_DummyGUI, name='display')
+        disk = ObjectInSubprocess(_DummyFileSaver, name='disk')
         resources = [camera, processor, display, disk]
         res_names = [str(r.name) for r in resources]
         acq_order = {r.name:[] for r in resources}
@@ -957,9 +954,11 @@ class _Tests():
                      for n in acq_order.keys()}
         threads = []
         for i in range(num_snaps):
-            threads.append(launch_custody_thread(snap, camera, args=(i,)))
+            th = CustodyThread(target=snap, first_resource=camera, args=(i,)
+                ).start()
+            threads.append(th)
         for th in threads:
-            th.join()
+            th.get_result()
 
         if not tqdm is None:
             for pb in pbars.values(): pb.close()
@@ -973,12 +972,10 @@ class _Tests():
 
     def test_indexing_views_of_views(self):
         import pickle
-
-        pm = ProxyManager((int(1e9),))
         ri = np.random.randint # Just to get short lines
 
         original_dimensions = (3, 3, 3, 256, 256)
-        a = pm.shared_numpy_array(0, shape=original_dimensions, dtype='uint8')
+        a = SharedNumpyArray(shape=original_dimensions, dtype='uint8')
         c = ri(0, 255, original_dimensions, dtype='uint8')
 
         assert not np.allclose(a, c), 'Shouldnt be equal yet'
