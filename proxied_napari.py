@@ -203,26 +203,13 @@ if __name__ == '__main__':
     # This will just close the viewer, not the child process.
     scope.display.close()
 
-    # If you want to kill the child process before the end of the script,
-    # you have to do something like this:
+    # If you want to stop the child process before the end of the script,
+    # all you have to do is remove all references to the object:
+    con = getattr(scope.display, '_')
+    scope.display = None # or del scope.display
+    assert not con.child_process.is_alive(), 'Napari process should be dead!'
 
-    import concurrency_tools
-    concurrency_tools._close(scope.display)
 
-    # We'll look into a way to make this a little easier to do. In theory,
-    # the child process should close when the proxy_object is garbage
-    # collected, however this isn't happening when we expect it to. Something
-    # for us to look into...
 
-    input('Hit enter to run off the end of the script...')
-
-    # Note -- calling methods of a closed proxy object will result in an
-    # OSError.
-    try:
-        scope.display.close()
-    except OSError:
-        pass # This is the exception we expected!
-    else:
-        raise AssertionError('We did not get the error we expected')
 
 
