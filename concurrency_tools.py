@@ -8,6 +8,8 @@ from contextlib import redirect_stdout
 import sys
 import traceback
 import inspect
+# Making sure objects are cleaned up nicely is tricky:
+import weakref
 # Making sure a child process closes when the parent exits is tricky:
 import atexit
 import signal
@@ -171,16 +173,29 @@ class SharedNumpyArray(np.ndarray):
         if shared_memory_name is None:
             dtype = np.dtype(dtype)
             requested_bytes = np.prod(shape, dtype='uint64') * dtype.itemsize
-            requested_bytes = int(requested_bytes) #
-            shm = shared_memory.SharedMemory(create=True, size=requested_bytes)
-            atexit.register(lambda: SharedNumpyArray._unlink(shm))
+            requested_bytes = int(requested_bytes)
+            try:
+                shm = shared_memory.SharedMemory(
+                    create=True, size=requested_bytes)
+            except OSError as e:
+                if e.args == (24, 'Too many open files'):
+                    raise OSError(
+                        "You tried to simultaneously open more "
+                        "SharedNumpyArrays than are allowed by your system!"
+                    ) from e
+                else:
+                    raise e
+            must_unlink = True # This process is responsible for unlinking
         else:
             shm = shared_memory.SharedMemory(
                 name=shared_memory_name, create=False)
+            must_unlink = False
         obj = super(SharedNumpyArray, cls).__new__(
             cls, shape, dtype, shm.buf, offset, strides, order)
         obj.shared_memory = shm
         obj.offset = offset
+        if must_unlink:
+            weakref.finalize(obj, shm.unlink)
         return obj
 
     def __array_finalize__(self, obj):
@@ -200,12 +215,6 @@ class SharedNumpyArray(np.ndarray):
             self.strides, None)
         return (SharedNumpyArray, args)
 
-    @staticmethod
-    def _unlink(shm):
-        try:
-            shm.unlink()
-        except FileNotFoundError:
-            pass ## must have already been called?
 
 class ResultThread(threading.Thread):
     """threading.Thread with all the simple features we wish it had.
@@ -395,9 +404,10 @@ class ObjectInSubprocess:
             self._.child_process.start()
             assert _get_response(self) == 'Successfully initialized'
         # Try to ensure the child process closes when we exit:
-        atexit.register(lambda: _close(self))
+        connection = getattr(self, '_')
+        weakref.finalize(self, _close, connection)
         try:
-            signal.signal(signal.SIGTERM, lambda s, f: _close(self))
+            signal.signal(signal.SIGTERM, lambda s, f: _close(connection))
         except ValueError: # We are probably starting from a thread.
             pass # Signal handling can only happen from main thread
 
@@ -424,9 +434,6 @@ class ObjectInSubprocess:
             self._.parent_pipe.send(('__setattr__', (name, value), {}))
             return _get_response(self)
 
-    def __del__(self):
-        _close(self)
-
 def _get_response(object_in_subprocess):
     """Effectively a method of ObjectInSubprocess, but defined externally to
     minimize shadowing of the object's namespace"""
@@ -437,15 +444,15 @@ def _get_response(object_in_subprocess):
         raise resp
     return resp
 
-def _close(object_in_subprocess):
+def _close(connection_to_subprocess):
     """Effectively a method of ObjectInSubprocess, but defined externally to
     minimize shadowing of the object's namespace"""
-    if not object_in_subprocess._.child_process.is_alive():
+    if not connection_to_subprocess.child_process.is_alive():
         return
-    with object_in_subprocess._.parent_pipe_lock:
-        object_in_subprocess._.parent_pipe.send(None)
-        object_in_subprocess._.child_process.join()
-        object_in_subprocess._.parent_pipe.close()
+    with connection_to_subprocess.parent_pipe_lock:
+        connection_to_subprocess.parent_pipe.send(None)
+        connection_to_subprocess.child_process.join()
+        connection_to_subprocess.parent_pipe.close()
 
 def _child_loop(child_pipe, initializer, initargs, initkwargs,
                 close_method_name, closeargs, closekwargs):
