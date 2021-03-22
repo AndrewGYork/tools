@@ -35,16 +35,16 @@ effectively uncommented; can you still figure out what it's doing?
                 #  EXAMPLE CODE (copypaste into 'test.py' and run) #
                 ####################################################
 from concurrency_tools import (
-    ObjectInSubprocess, CustodyThread, SharedNumpyArray)
+    ObjectInSubprocess, CustodyThread, SharedNDArray)
 from dummy_module import Camera, Preprocessor, Display
 
 def main():
     data_buffers = [
-        SharedNumpyArray(shape=(10, 2000, 2000), dtype='uint16'),
-        SharedNumpyArray(shape=(10, 2000, 2000), dtype='uint16')]
+        SharedNDArray(shape=(10, 2000, 2000), dtype='uint16'),
+        SharedNDArray(shape=(10, 2000, 2000), dtype='uint16')]
     display_buffers = [
-        SharedNumpyArray(shape=(2000, 2000), dtype='uint8'),
-        SharedNumpyArray(shape=(2000, 2000), dtype='uint8')]
+        SharedNDArray(shape=(2000, 2000), dtype='uint8'),
+        SharedNDArray(shape=(2000, 2000), dtype='uint8')]
 
     camera = ObjectInSubprocess(Camera)
     preprocessor = ObjectInSubprocess(Preprocessor)
@@ -130,7 +130,7 @@ if __name__ == '__main__':
     main()
 """
 
-class SharedNumpyArray(np.ndarray):
+class SharedNDArray(np.ndarray):
     """A numpy array that lives in shared memory
 
     Inputs and outputs to/from ObjectInSubprocess are 'serialized', which
@@ -154,8 +154,8 @@ class SharedNumpyArray(np.ndarray):
 
     ...but instead you write code that looks like this:
 
-        data_buf = SharedNumpyArray(shape=(400, 2000, 2000), dtype='uint16')
-        display_buf = SharedNumpyArray(shape=(2000, 2000), dtype='uint8')
+        data_buf = SharedNDArray(shape=(400, 2000, 2000), dtype='uint16')
+        display_buf = SharedNDArray(shape=(2000, 2000), dtype='uint8')
 
         camera = ObjectInSubprocess(Camera)
         preprocessor = ObjectInSubprocess(Preprocessor)
@@ -167,6 +167,8 @@ class SharedNumpyArray(np.ndarray):
 
     ...and your payoff is, each object gets its own CPU core, AND passing
     large numpy arrays between the processes is still really fast!
+
+    To implement this we used memmap from numpy.core as a template.
     """
     def __new__(cls, shape=None, dtype=float, shared_memory_name=None,
                 offset=0, strides=None, order=None):
@@ -181,7 +183,7 @@ class SharedNumpyArray(np.ndarray):
                 if e.args == (24, 'Too many open files'):
                     raise OSError(
                         "You tried to simultaneously open more "
-                        "SharedNumpyArrays than are allowed by your system!"
+                        "SharedNDArrays than are allowed by your system!"
                     ) from e
                 else:
                     raise e
@@ -190,7 +192,7 @@ class SharedNumpyArray(np.ndarray):
             shm = shared_memory.SharedMemory(
                 name=shared_memory_name, create=False)
             must_unlink = False
-        obj = super(SharedNumpyArray, cls).__new__(
+        obj = super(SharedNDArray, cls).__new__(
             cls, shape, dtype, shm.buf, offset, strides, order)
         obj.shared_memory = shm
         obj.offset = offset
@@ -201,20 +203,42 @@ class SharedNumpyArray(np.ndarray):
     def __array_finalize__(self, obj):
         if obj is None:
             return
-        if not isinstance(obj, SharedNumpyArray):
+        if not isinstance(obj, SharedNDArray):
             raise ValueError(
                 "You can't view non-shared memory as shared memory.")
-        self.shared_memory = obj.shared_memory
-        self.offset = obj.offset
-        self.offset += (self.__array_interface__['data'][0] -
-                         obj.__array_interface__['data'][0])
+        if hasattr(obj, 'shared_memory') and  np.may_share_memory(self, obj):
+            self.shared_memory = obj.shared_memory
+            self.offset = obj.offset
+            self.offset += (self.__array_interface__['data'][0] -
+                             obj.__array_interface__['data'][0])
+
+    def __array_wrap__(self, arr, context=None):
+        arr = super().__array_wrap__(arr, context)
+
+        # Return a SharedNDArray if a SharedNDArray was given as the
+        # output of the ufunc. Leave the arr class unchanged if self is not
+        # a SharedNDArray to keep original SharedNDArray subclasses
+        # behavior.
+
+        if self is arr or type(self) is not SharedNDArray:
+            return arr
+        # Return scalar instead of 0d SharedMemory, e.g. for np.sum with
+        # axis=None
+        if arr.shape == ():
+            return arr[()]
+        # Return ndarray otherwise
+        return arr.view(np.ndarray)
+
+    def __getitem__(self, index):
+        res = super().__getitem__(index)
+        if type(res) is SharedNDArray and not hasattr(res, 'shared_memory'):
+            return res.view(type=np.ndarray)
+        return res
 
     def __reduce__(self):
-        args = (
-            self.shape, self.dtype, self.shared_memory.name, self.offset,
-            self.strides, None)
-        return (SharedNumpyArray, args)
-
+        args = (self.shape, self.dtype, self.shared_memory.name,
+                self.offset, self.strides, None)
+        return (SharedNDArray, args)
 
 class ResultThread(threading.Thread):
     """threading.Thread with all the simple features we wish it had.
@@ -691,7 +715,7 @@ class _Tests():
             return shared_numpy_array.shape
 
         def test_shared_numpy_return(self, shape=(5,5)):
-            return SharedNumpyArray(shape=shape)
+            return SharedNDArray(shape=shape)
 
         def test_modify_array(self, a):
             a.fill(1)
@@ -699,6 +723,15 @@ class _Tests():
 
         def test_return_array(self, a):
             return a
+
+        def test_return_slice(self, a, *args):
+            return a[args]
+
+        def sum(self, a):
+            return a.sum()
+
+        def store_array(self, a):
+            self.a = a
 
         def nested_method(self, crash=False):
             self._nested_method(crash)
@@ -735,7 +768,7 @@ class _Tests():
                 ri(1, min(6, a))
                 )
             for a in original_dimensions)
-        a = SharedNumpyArray(shape=original_dimensions, dtype=dtype)
+        a = SharedNDArray(shape=original_dimensions, dtype=dtype)
         a.fill(0)
         b = a[slicer] ## should be a view
         b.fill(1)
@@ -757,7 +790,7 @@ class _Tests():
         dtype = int
         sz = int(np.prod(shape, dtype='uint64')*np.dtype(int).itemsize)
         object_with_shared_memory = ObjectInSubprocess(_Tests.TestClass)
-        a = SharedNumpyArray(shape=shape, dtype=dtype)
+        a = SharedNDArray(shape=shape, dtype=dtype)
         a.fill(0)
         a = object_with_shared_memory.test_modify_array(a)
         assert a.sum() == np.product(shape, dtype='uint64'), (
@@ -793,6 +826,12 @@ class _Tests():
         a = ObjectInSubprocess(_Tests.TestClass, 'attribute', x=4)
         assert a.x == 4
         assert getattr(a, 'x') == 4
+
+    def testing_array_values_after_passing_to_subprocess(self):
+        p = ObjectInSubprocess(_Tests.TestClass)
+        a = SharedNDArray(shape=(10, 1))
+        a[:] = 1
+        assert a.sum() == p.sum(a)
 
     def test_object_in_subprocess_overhead(self):
         print('Performance summary:')
@@ -830,7 +869,7 @@ class _Tests():
         name = f'{shape} array {direction} {pass_by}'
         object_with_shared_memory = ObjectInSubprocess(_Tests.TestClass)
         if pass_by == 'reference':
-            a = SharedNumpyArray(shape, dtype=dtype)
+            a = SharedNDArray(shape, dtype=dtype)
             timeout_us = 5e3
         elif pass_by == 'serialization':
             a = np.zeros(shape=shape, dtype=dtype)
@@ -977,12 +1016,95 @@ class _Tests():
             assert sorted(th_o) == th_o,\
                 f'Resource `{r}` was used out of order! -- {th_o}'
 
+    def test_shared_numpy_array_np_operations(self):
+        import pickle
+        ri = np.random.randint # Just to get short lines
+
+        original_dimensions = (3, 3, 3, 256, 256)
+        a = SharedNDArray(shape=original_dimensions, dtype='uint8')
+        c = ri(0, 255, original_dimensions, dtype='uint8')
+        a[:] = c # fill a with random values from c
+        # Views should still share memory
+        view_by_slice = a[:1, 2:3, ..., :10, 100:-100]
+        assert isinstance(a, SharedNDArray)
+        assert type(a) is type(view_by_slice)
+        assert a.shared_memory is view_by_slice.shared_memory
+
+        b = a.sum(axis=-1)
+        assert isinstance(b, np.ndarray), type(b)
+        assert not isinstance(b, SharedNDArray), type(b)
+
+        # Single number should not be returned as a shared numpy array
+        b = a.sum(axis=None)
+        assert b.shape == (), b.shape
+        assert not isinstance(b, SharedNDArray), type(b)
+
+        b = a + 1
+        assert isinstance(b, np.ndarray), type(b)
+        assert not isinstance(b, SharedNDArray), type(b)
+
+        _a = pickle.loads(pickle.dumps(a))
+        assert _a.sum() == a.sum()
+        _view_by_slice = pickle.loads(pickle.dumps(view_by_slice))
+        assert _view_by_slice.sum() == view_by_slice.sum()
+
+    def test_accessing_unlinked_memory(self):
+        import pickle
+        original_dimensions = (3, 3, 3, 256, 256)
+        a = SharedNDArray(shape=original_dimensions, dtype='uint8')
+        _a = pickle.dumps(a)
+        del a
+        try:
+            a = pickle.loads(_a)
+        except FileNotFoundError:
+            pass # we expected this error
+        else:
+            raise AssertionError('Did not get the error we expected')
+
+        p = ObjectInSubprocess(_Tests.TestClass)
+        a = SharedNDArray(shape=original_dimensions, dtype='uint8')
+        p.store_array(a)
+        p.a.sum()
+        del a
+        try:
+            p.a.sum()
+        except FileNotFoundError:
+            pass # we expected this error
+        else:
+            raise AssertionError('Did not get the error we expected')
+
+    def test_sending_arrays(self):
+        p = ObjectInSubprocess(_Tests.TestClass)
+        original_dimensions = (3, 3, 3, 256, 256)
+        a = SharedNDArray(shape=original_dimensions, dtype='uint8')
+
+        _a = p.test_return_array(a)
+        assert isinstance(_a, SharedNDArray)
+        assert _a.shared_memory.name == a.shared_memory.name
+        assert _a.offset == a.offset
+        assert _a.strides == a.strides
+
+        _a = p.test_modify_array(a)
+        assert isinstance(_a, SharedNDArray)
+        assert _a.shared_memory.name == a.shared_memory.name
+        assert _a.offset == a.offset
+        assert _a.strides == a.strides
+
+        _a = p.test_return_slice(a, slice(1, -1), ..., slice(3, 100, 10))
+        assert isinstance(_a, SharedNDArray)
+        assert _a.shared_memory.name == a.shared_memory.name
+        assert _a.offset != a.offset
+        assert _a.strides != a.strides
+
+        _a = p.sum(a)
+        assert isinstance(_a, np.uint64)
+
     def test_indexing_views_of_views(self):
         import pickle
         ri = np.random.randint # Just to get short lines
 
         original_dimensions = (3, 3, 3, 256, 256)
-        a = SharedNumpyArray(shape=original_dimensions, dtype='uint8')
+        a = SharedNDArray(shape=original_dimensions, dtype='uint8')
         c = ri(0, 255, original_dimensions, dtype='uint8')
 
         assert not np.allclose(a, c), 'Shouldnt be equal yet'
@@ -1018,7 +1140,6 @@ class _Tests():
             self._run_single_test(i, t)
         self._summarize_results()
 
-
     def _run_single_test(self, i, t):
         printed_output = io.StringIO()
         name = t[5:].replace('_', ' ')
@@ -1036,6 +1157,9 @@ class _Tests():
         except Exception as e:
             print('v'*80)
             print(traceback.format_exc().strip('\n'))
+            print('^'*80)
+            print('v'*80)
+            print(printed_output.getvalue())
             print('^'*80)
         else:
             self.passed += 1
