@@ -8,8 +8,7 @@ import traceback
 import napari
 from qtpy.QtCore import QTimer
 # Our stuff
-from concurrency_tools import (
-    _dummy_function, SharedNumpyArray, ObjectInSubprocess)
+from concurrency_tools import ObjectInSubprocess, SharedNDArray, _dummy_function
 
 def display(display_type=None):
     """Creates a simplified non-blocking napari viewer in a subprocess.
@@ -26,13 +25,13 @@ def display(display_type=None):
     return display
 
 class _NapariDisplay:
-    """This is a barebones example of a proxiable napari viewer.
+    """This is a barebones example of a simplified napari viewer.
 
     The idea is to expose a subset of napari's rich, deep API as a shallow,
-    simple API that proxy_objects can handle.
+    simple API that concurrency_tools.ObjectInSubprocess can handle.
 
-    We encourage you to edit this class to suit your purposes.
-    The only requirement is that it has a `close` method.
+    We encourage you to define your own version of this class to suit your
+    purposes. The only requirement is that it has a `close` method.
     """
     def __init__(self):
         self.viewer = napari.Viewer()
@@ -47,17 +46,15 @@ class _NapariDisplay:
         self.viewer.close()
 
 # We're pretty confident that you shouldn't have to understand anything below
-# this. If you want to extend the functionality of the proxied napari viewer
+# this. If you want to extend the functionality of the simplified napari viewer
 # this can probably be done by creating your own modified version of the
-# _NapariDisplay  class above.
+# _NapariDisplay class above.
 
 def _napari_child_loop(child_pipe, initializer, initargs, initkwargs,
                        close_method_name, closeargs, closekwargs):
-    """Teach Qt's event loop how to act like a ProxyObject's child process."""
-
-    # If any of the initargs are _SharedNumpyArrays, we have to show them where
-    # to find shared memory:
-
+    """Teach Qt's event loop how to act like an ObjectInSubprocess's child
+    process.
+    """
     closeargs = tuple() if closeargs is None else closeargs
     closekwargs = dict() if closekwargs is None else closekwargs
     state = { # Mutable, to store the state of the child object.
@@ -148,7 +145,7 @@ class _Microscope:
         import queue
         import time
         self.data_buffers = [
-            SharedNumpyArray(shape=(1, 2048, 2060), dtype='uint16')
+            SharedNDArray(shape=(1, 2048, 2060), dtype='uint16')
             for i in range(2)]
         self.data_buffer_queue = queue.Queue()
         for i in range(len(self.data_buffers)):
@@ -190,14 +187,13 @@ class _Camera:
 if __name__ == '__main__':
     scope = _Microscope()
     snap_threads = []
-    import threading
     print("Launching a ton of 'snap' threads...")
     for i in range(50):
         th = scope.snap()
         snap_threads.append(th)
     print(len(snap_threads), "'snap' threads launched.")
     for th in snap_threads:
-        th.join()
+        th.get_result()
     print("All 'snap' threads finished execution.")
     input('Hit enter to close napari...')
     # This will just close the viewer, not the child process.
