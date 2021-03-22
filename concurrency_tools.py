@@ -1049,7 +1049,7 @@ class _Tests():
         assert _view_by_slice.sum() == view_by_slice.sum()
 
     def test_accessing_unlinked_memory(self):
-        import pickle
+        import pickle, os
         original_dimensions = (3, 3, 3, 256, 256)
         a = SharedNDArray(shape=original_dimensions, dtype='uint8')
         _a = pickle.dumps(a)
@@ -1071,7 +1071,10 @@ class _Tests():
         except FileNotFoundError:
             pass # we expected this error
         else:
-            raise AssertionError('Did not get the error we expected')
+            if os.name != 'nt':
+                raise AssertionError('Did not get the error we expected')
+            else:
+                pass # Windows has different behavior
 
     def test_sending_arrays(self):
         p = ObjectInSubprocess(_Tests.TestClass)
@@ -1097,7 +1100,7 @@ class _Tests():
         assert _a.strides != a.strides
 
         _a = p.sum(a)
-        assert isinstance(_a, np.uint64)
+        assert np.isscalar(_a), type(_a)
 
     def test_indexing_views_of_views(self):
         import pickle
