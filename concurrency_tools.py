@@ -686,15 +686,406 @@ if mp.get_start_method(allow_none=True) != 'spawn':
     mp.set_start_method('spawn')
 
 # Testing block.
-class _Tests():
-    '''
-    Method names that start with `test_` will be run.
+class MyTestClass:
+    """Homemade testing class. Mostly written out of curiosity to see
+    what features we would want and if it could be done easily without adding
+    another import. Not as featured as a "real" testing package, but that
+    wasn't the point.
 
-    Use: _test_... method names for tests that are called as part
-    of a larger group.
-    '''
+    To create a set of tests, subclass this class and add methods to it.
+
+    By default, methods names start with `test_` will be called by `run`.
+
+    If the test is expected to generate any specific print output in STDOUT,
+    return that expected output as a string at the end of the test function.
+    """
+    def run(self, test_prefix='test_'):
+        """Runs all methods that begin with `test_prefix`"""
+        tests = [i for i in dir(self) if i.startswith(test_prefix)]
+        tests = [i for i in tests if callable(getattr(self, i))]
+
+        print(f'{"#":#^80s}')
+        print(f'{f" Running Tests of {self.__class__.__name__} ":#^80s}')
+        print(f'{"#":#^80s}')
+        self.tests = len(tests)
+        self.passed = 0
+        for i, t in enumerate(tests):
+            self._run_single_test(i, t)
+        self._summarize_results()
+
+    def _run_single_test(self, i, t):
+        printed_output = io.StringIO()
+        name = t[5:].replace('_', ' ')
+        print(f'{f"     {i+1} of {self.tests} | Testing {name}    ":-^80s}')
+        try:
+            with redirect_stdout(printed_output):
+                expected_output = getattr(self, t)()
+            if expected_output is not None:
+                o = printed_output.getvalue()
+                assert expected_output == o, \
+                    f'\n Returned result:\n'\
+                    f'    `{repr(o)}`\n'\
+                    f' Did not match expected output:\n'\
+                    f'     "{repr(expected_output)}"\n'
+        except Exception as e:
+            print('v'*80)
+            print(traceback.format_exc().strip('\n'))
+            print('^'*80)
+            print('v'*80)
+            print(printed_output.getvalue())
+            print('^'*80)
+        else:
+            self.passed += 1
+            if printed_output.getvalue():
+                for l in printed_output.getvalue().strip('\n').split('\n'):
+                    print(f'   {l}')
+            print(f'{f"> Success <":-^80s}')
+
+    def _summarize_results(self):
+        fill = '#' if self.passed == self.tests else '!'
+        print(f'{fill}'*80)
+        message = (f"Completed Tests for {self.__class__.__name__} "
+                   f"-- passed {self.passed} of {self.tests}")
+        if fill == "#":
+            print(f'{f"  {message}  ":#^80s}')
+        else:
+            print(f'{f"  {message}  ":!^80s}')
+        print(f'{fill}'*80)
+
+
+    def time_it(self, n_loops, func, args=None, kwargs=None, fail=True,
+                timeout_us=None, name=None):
+        """Useful for testing the performance of a specific function.
+
+        Args:
+            - n_loops <int> | number of loops to test
+            - func <callable> | function/method to test
+            - args/kwargs | arguments to the function
+            - fail <bool> | Allow the method to raise an exception?
+            - timeout_us <int/float> | If the average duration exceeds this
+                limit, raise a TimeoutError.
+            - name <str> | formatted name for the progress bar.
+        """
+        import time
+        try:
+            from tqdm import tqdm
+        except ImportError:
+            tqdm = None ## No progress bars :(
+
+        start = time.perf_counter()
+        if args is None:
+            args = ()
+        if kwargs is None:
+            kwargs = {}
+        if tqdm is not None:
+            f = '{desc: <38}{n: 7d}-{bar:17}|[{rate_fmt}]'
+            pb = tqdm(total=n_loops, desc=name, bar_format=f)
+        for i in range(n_loops):
+            if tqdm is not None: pb.update(1)
+            try:
+                func(*args, **kwargs)
+            except Exception as e:
+                if fail:
+                    raise e
+                else:
+                    pass
+        if not tqdm is None: pb.close()
+        end = time.perf_counter()
+        time_per_loop_us = ((end-start) / n_loops)*1e6
+
+        if timeout_us is not None:
+            if time_per_loop_us > timeout_us:
+                name = func.__name__ if name is None else name
+                raise TimeoutError(
+                    f'Timed out on {name}\n'
+                    f'   args:{args}\n'
+                    f'   kwargs: {kwargs}\n'
+                    f' Each loop took {time_per_loop_us:.2f} \u03BCs'
+                    f' (Allowed: {timeout_us:.2f} \u03BCs)')
+        return time_per_loop_us
+
+
+class TestResultThreadandCustodyThread(MyTestClass):
+    """Various test of the functions and expected behavior of the ResultThread
+    and CustodyThread classes.
+    """
+    def test_thread_behavior(self):
+        th = ResultThread(target=lambda: 1)
+        th.start()
+        th.join()
+        assert not th.is_alive()
+
+    def test_new_start_behavior(self):
+        th = ResultThread(target=lambda: 1)
+        assert hasattr(th, '_return')
+        _th = th.start()
+        assert isinstance(_th, ResultThread)
+        assert th is _th
+
+    def test_getting_result(self):
+        th = ResultThread(target=lambda: 1).start()
+        th.join()
+        assert th.get_result() == 1
+        assert th.get_result() == 1, "Couldn't get result twice!"
+
+    def test_passing_args_and_kwargs(self):
+        def mirror(*args, **kwargs):
+            return args, kwargs
+        a = (1,)
+        k = dict(a=1)
+        th = ResultThread(target=mirror, args=a, kwargs=k).start()
+        _a, _k = th.get_result()
+        assert a == _a, f"{a} != {_a}"
+        assert k == _k, f"{k} != {_k}"
+
+    def test_catching_exception(self):
+        def e():
+            raise ValueError('TEST')
+        th = ResultThread(target=e).start()
+        th.join() # join is just join
+        assert hasattr(th, 'exc_value')
+        try:
+            th.get_result()
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('We didnt get the exception....')
+        # We should be able to reraise this exception as long as we have
+        # a reference to it:
+        try:
+            th.get_result()
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('We didnt get the exception....')
+
+    def test_reaching_system_threadlimit(self):
+        """ I can't get this test to "pass" """
+        import time
+        exit = False
+        def f():
+            while not exit:
+                time.sleep(0.05)
+
+        try:
+            ths = [ResultThread(target=f).start() for i in range(int(1e3))]
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError('We didnt reach the thread limit!')
+        finally:
+            exit = True
+
+    def test_custody_thread_target_args(self):
+        # accepts a target with custody kwargs
+        def custody_f(custody=None):
+            return 1
+        th = CustodyThread(target=custody_f, first_resource=None).start()
+
+        # accepts a target with a custody positional argument
+        def custody_f(custody):
+            return 1
+        th = CustodyThread(target=custody_f, first_resource=None).start()
+
+        def f():
+            return 1
+        try:
+            th = CustodyThread(target=f, first_resource=None).start()
+        except ValueError:
+            pass # we expect this
+        else:
+            raise AssertionError('We didnt get the exception....')
+        def f(a):
+            return 1
+        try:
+            th = CustodyThread(target=f, first_resource=None).start()
+        except ValueError:
+            pass # we expect this
+        else:
+            raise AssertionError('We didnt get the exception....')
+        def f(a=1):
+            return 1
+        try:
+            th = CustodyThread(target=f, first_resource=None).start()
+        except ValueError:
+            pass # we expect this
+        else:
+            raise AssertionError('We didnt get the exception....')
+            th.join()
+        res = th.get_result()
+        assert res == 1, f"{res} != expected result (1)"
+
+    def test_providing_first_resource(self):
+        resource = _WaitingList()
+        t = {'step': 0, 'progress': 0}
+        def f(custody):
+            while t['step'] == 0:
+                pass
+            t['progress'] += 1
+            custody.switch_from(None, resource)
+            while t['step'] == 1:
+                pass
+            t['progress'] += 1
+            custody.switch_from(resource, None)
+            return
+        try:
+            th = CustodyThread(target=f, first_resource=resource).start()
+            assert hasattr(th, "custody"), 'Should have a custody attribute.'
+            assert not th.custody.has_custody, 'Should not have custody yet.'
+            assert th.custody.target_resource is resource, 'Should be in line'
+            # Make target thread progress one step and acquire custody
+            t['step'] += 1
+            while t['progress'] == 0:
+                pass # wait for thread
+            assert th.custody.has_custody, 'Should have gotten custody.'
+            assert th.custody.target_resource is resource
+            t['step'] += 1 # make target progress to next step and exit
+            th.join()
+        finally: # if anything goes wrong, make sure the thread exits
+            t['step'] = -1
+
+class TestSharedNDArray(MyTestClass):
+    """Various tests of the SharedNumpyArray class """
+    def test_types(self):
+        a = SharedNDArray(shape=(1,), dtype='uint8')
+        assert isinstance(a, SharedNDArray)
+        assert isinstance(a, np.ndarray)
+
+        assert hasattr(a, "shared_memory")
+        assert isinstance(a.shared_memory, shared_memory.SharedMemory)
+
+    def test_preserved_ndarray_behavior(self):
+        """Making sure we didn't break anything"""
+        ri = np.random.randint # Just to get short lines
+        original_dimensions = (3, 3, 3, 256, 256)
+        a = SharedNDArray(shape=original_dimensions, dtype='uint8')
+        c = ri(0, 255, original_dimensions, dtype='uint8')
+        a[:] = c # fill a with random values from c
+        # Views should still share memory
+        view_by_slice = a[:1, 2:3, ..., :10, 100:-100]
+        assert isinstance(a, SharedNDArray)
+        assert type(a) is type(view_by_slice)
+        assert a.shared_memory is view_by_slice.shared_memory
+
+        # Some functions should not return a SharedNDArray
+        b = a.sum(axis=-1)
+        assert isinstance(b, np.ndarray), type(b)
+        assert not isinstance(b, SharedNDArray)
+
+        b = a + 1
+        assert isinstance(b, np.ndarray), type(b)
+        assert not isinstance(b, SharedNDArray), type(b)
+
+        b = a.sum()
+        assert np.isscalar(b)
+        assert not isinstance(b, SharedNDArray)
+
+    def test_serialization(self):
+        import pickle
+        ri = np.random.randint # Just to get short lines
+        original_dimensions = (3, 3, 3, 256, 256)
+        a = SharedNDArray(shape=original_dimensions, dtype='uint8')
+        c = ri(0, 255, original_dimensions, dtype='uint8')
+        a[:] = c # fill a with random values from c
+        # Views should still share memory
+        view_by_slice = a[:1, 2:3, ..., :10, 100:-100]
+        view_of_a_view = view_by_slice[..., 1:, 10:-10:3]
+        _a = pickle.loads(pickle.dumps(a))
+        assert _a.sum() == a.sum()
+        assert np.allclose(a, _a)
+
+        _view_by_slice = pickle.loads(pickle.dumps(view_by_slice))
+        assert _view_by_slice.sum() == view_by_slice.sum()
+        assert np.allclose(_view_by_slice, view_by_slice)
+
+        _view_of_a_view = pickle.loads(pickle.dumps(view_of_a_view))
+        assert _view_of_a_view.sum() == view_of_a_view.sum()
+        assert np.allclose(_view_of_a_view, view_of_a_view)
+
+    def test_viewcasting(self):
+        a = SharedNDArray(shape=(1,))
+        v = a.view(np.ndarray)
+        assert isinstance(v, np.ndarray), type(v)
+        assert not isinstance(v, SharedNDArray), type(v)
+        a = np.zeros(shape=(1,))
+        try:
+            v = a.view(SharedNDArray)
+        except ValueError:
+            pass # we expected this
+        else:
+            raise AssertionError("We didn't raise the correct exception!")
+
+    def test_auto_unlinking_memory(self):
+        import gc
+        a = SharedNDArray(shape=(1,))
+        name = a.shared_memory.name
+        del a
+        gc.collect()
+        try:
+            shared_memory.SharedMemory(name=name)
+        except FileNotFoundError:
+            pass # this is the error we expected if the memory was released.
+        else:
+            raise AssertionError("We didn't raise the correct exception!")
+
+    def test_accessing_unlinked_memory(self):
+        import pickle
+        original_dimensions = (3, 3, 3, 256, 256)
+        a = SharedNDArray(shape=original_dimensions, dtype='uint8')
+        _a = pickle.dumps(a)
+        del a
+        try:
+            a = pickle.loads(_a)
+        except FileNotFoundError:
+            pass # we expected this error
+        else:
+            raise AssertionError('Did not get the error we expected')
+
+    def test_accessing_unlinked_memory_in_subprocess(self):
+        p = ObjectInSubprocess(TestObjectInSubprocess.TestClass)
+        original_dimensions = (3, 3, 3, 256, 256)
+        a = SharedNDArray(shape=original_dimensions, dtype='uint8')
+        p.store_array(a)
+        p.a.sum()
+        del a
+        try:
+            p.a.sum()
+        except FileNotFoundError:
+            pass # we expected this error
+        else:
+            if os.name != 'nt': # This is allowed on windows.
+                raise AssertionError('Did not get the error we expected')
+
+    def test_reconnnecting_and_disconnecting_views(self):
+        for i in range(500):
+            self._trial_slicing_of_shared_array()
+
+    def _trial_slicing_of_shared_array(self):
+        import pickle
+        ri = np.random.randint # Just to get short lines
+        dtype = np.dtype(np.random.choice(
+            [np.uint16, np.uint8, float, np.float32, np.float64]))
+        original_dimensions = tuple(
+            ri(2, 100) for d in range(ri(2, 5)))
+        slicer = tuple(
+            slice(
+                ri(0, a//2),
+                ri(0, a//2)*-1,
+                ri(1, min(6, a))
+                )
+            for a in original_dimensions)
+        a = SharedNDArray(shape=original_dimensions, dtype=dtype)
+        a.fill(0)
+        b = a[slicer] ## should be a view
+        b.fill(1)
+        expected_total = int(b.sum())
+        reloaded_total = pickle.loads(pickle.dumps(b)).sum()
+        assert expected_total == reloaded_total, \
+            f'Failed {dtype.name}/{original_dimensions}/{slicer}'
+
+class TestObjectInSubprocess(MyTestClass):
     class TestClass:
-        """Toy class that can be pout in a subprocess for testing """
+        """Toy class that can be put in a subprocess for testing."""
         def __init__(self, *args, **kwargs):
             for k, v in kwargs.items():
                 setattr(self, k, v)
@@ -740,72 +1131,69 @@ class _Tests():
             if crash:
                 raise ValueError('This error was supposed to be raised')
 
-    def __init__(self):
-        print(f'{"#":#^80s}')
-        print(f'{" Running Tests ":#^80s}')
-        print(f'{"#":#^80s}')
-        self.tests = 0
-        self.passed = 0
+    class _DummyObject:
+        def __init__(self, name='generic_dummy_obj'):
+            self.name = name
+
+    class _DummyCamera(_DummyObject):
+        def record(self, a):
+            import time
+            time.sleep(.05)
+            return a
+
+    class _DummyProcessor(_DummyObject):
+        def process(self, a):
+            import time
+            time.sleep(.2)
+            return a
+
+    class _DummyGUI(_DummyObject):
+        def display(self, a):
+            import time
+            time.sleep(.002)
+            return a
+
+    class _DummyFileSaver(_DummyObject):
+        def save(self, a):
+            import time
+            time.sleep(.3)
+            return a
 
     def test_create_object_in_subprocess(self):
-        object_in_subprocess = ObjectInSubprocess(_Tests.TestClass)
-
-    def test_reconnnecting_and_disconnecting_views(self):
-        for i in range(1000):
-            self._trial_slicing_of_shared_array()
-
-    def _trial_slicing_of_shared_array(self):
-        import pickle
-        ri = np.random.randint # Just to get short lines
-        dtype = np.dtype(np.random.choice(
-            [np.uint16, np.uint8, float, np.float32, np.float64]))
-        original_dimensions = tuple(
-            ri(2, 100) for d in range(ri(2, 5)))
-        slicer = tuple(
-            slice(
-                ri(0, a//2),
-                ri(0, a//2)*-1,
-                ri(1, min(6, a))
-                )
-            for a in original_dimensions)
-        a = SharedNDArray(shape=original_dimensions, dtype=dtype)
-        a.fill(0)
-        b = a[slicer] ## should be a view
-        b.fill(1)
-        expected_total = int(b.sum())
-        reloaded_total = pickle.loads(pickle.dumps(b)).sum()
-        assert expected_total == reloaded_total, \
-            f'Failed {dtype.name}/{original_dimensions}/{slicer}'
+        p = ObjectInSubprocess(TestObjectInSubprocess.TestClass)
 
     def test_passing_normal_numpy_array(self):
         shape = (10, 10)
         dtype = int
         sz = int(np.prod(shape, dtype='uint64')*np.dtype(int).itemsize)
         a = np.zeros(shape, dtype)
-        object_with_shared_memory = ObjectInSubprocess(_Tests.TestClass)
-        object_with_shared_memory.test_shared_numpy_input(a)
+        p = ObjectInSubprocess(TestObjectInSubprocess.TestClass)
+        p.test_shared_numpy_input(a)
 
     def test_passing_retrieving_shared_array(self):
         shape = (10, 10)
         dtype = int
         sz = int(np.prod(shape, dtype='uint64')*np.dtype(int).itemsize)
-        object_with_shared_memory = ObjectInSubprocess(_Tests.TestClass)
+        p = ObjectInSubprocess(TestObjectInSubprocess.TestClass)
         a = SharedNDArray(shape=shape, dtype=dtype)
         a.fill(0)
-        a = object_with_shared_memory.test_modify_array(a)
+        a = p.test_modify_array(a)
         assert a.sum() == np.product(shape, dtype='uint64'), (
             'Contents of array not correct!')
 
     def test_raise_attribute_error(self):
-        a = ObjectInSubprocess(_Tests.TestClass, 'attribute', x=4,)
+        a = ObjectInSubprocess(
+            TestObjectInSubprocess.TestClass, 'attribute', x=4)
         try:
             a.z
         except AttributeError as e: # Get __this__ specific error
             print("Attribute error handled by parent process:\n ", e)
 
     def test_printing_in_child_process(self):
-        a = ObjectInSubprocess(_Tests.TestClass, 'attribute', x=4,)
-        b = ObjectInSubprocess(_Tests.TestClass, x=5)
+        a = ObjectInSubprocess(
+            TestObjectInSubprocess.TestClass, 'attribute', x=4)
+        b = ObjectInSubprocess(
+            TestObjectInSubprocess.TestClass, x=5)
         b.printing_method('Hello')
         a.printing_method('A')
         a.printing_method('Hello', 'world', end='', flush=True)
@@ -816,14 +1204,16 @@ class _Tests():
         return expected_output
 
     def test_setting_attribute_of_object_in_subprocess(self):
-        a = ObjectInSubprocess(_Tests.TestClass, 'attribute', x=4,)
+        a = ObjectInSubprocess(
+            TestObjectInSubprocess.TestClass, 'attribute', x=4)
         a.z = 10
         assert a.z == 10
         setattr(a, 'z', 100)
         assert a.z == 100
 
     def test_getting_attribute_of_object_in_subprocess(self):
-        a = ObjectInSubprocess(_Tests.TestClass, 'attribute', x=4)
+        a = ObjectInSubprocess(
+            TestObjectInSubprocess.TestClass, 'attribute', x=4)
         assert a.x == 4
         assert getattr(a, 'x') == 4
 
@@ -836,7 +1226,8 @@ class _Tests():
     def test_object_in_subprocess_overhead(self):
         print('Performance summary:')
         n_loops = 10000
-        a = ObjectInSubprocess(_Tests.TestClass, 'attribute', x=4,)
+        a = ObjectInSubprocess(
+            TestObjectInSubprocess.TestClass, 'attribute', x=4)
         t = self.time_it(
             n_loops, a.test_method, timeout_us=100, name='Trivial method call')
         print(f" {t:.2f} \u03BCs per trivial method call.")
@@ -867,14 +1258,14 @@ class _Tests():
         sz = int(np.prod(shape, dtype='uint64')*np.dtype(int).itemsize)
         direction = '<->' if method_name == 'test_modify_array' else '->'
         name = f'{shape} array {direction} {pass_by}'
-        object_with_shared_memory = ObjectInSubprocess(_Tests.TestClass)
+        shm_obj = ObjectInSubprocess(TestObjectInSubprocess.TestClass)
         if pass_by == 'reference':
             a = SharedNDArray(shape, dtype=dtype)
             timeout_us = 5e3
         elif pass_by == 'serialization':
             a = np.zeros(shape=shape, dtype=dtype)
             timeout_us = 1e6
-        func = getattr(object_with_shared_memory, method_name)
+        func = getattr(shm_obj, method_name)
         t_per_loop = self.time_it(n_loops, func, (a,), timeout_us=timeout_us,
                                   name=name)
         print(f' {t_per_loop:.2f} \u03BCs per {name}')
@@ -933,12 +1324,12 @@ class _Tests():
 
     def test_incorrect_thread_management(self):
 
-        p = ObjectInSubprocess(_Tests.TestClass)
-        p.x = 5
+        shm_obj = ObjectInSubprocess(TestObjectInSubprocess.TestClass)
+        shm_obj.x = 5
         exceptions = [1]
         def t():
             try:
-                p.x
+                shm_obj.x
             except RuntimeError: ## Should raise this
                 pass
             else:
@@ -980,10 +1371,14 @@ class _Tests():
         # Create objects in subprocesses that are mocked resources to use.
         # Each has a method that sleep for some amount of time and
         # returns `True`.
-        camera = ObjectInSubprocess(_DummyCamera, name='camera')
-        processor = ObjectInSubprocess(_DummyProcessor, name='processor')
-        display = ObjectInSubprocess(_DummyGUI, name='display')
-        disk = ObjectInSubprocess(_DummyFileSaver, name='disk')
+        camera = ObjectInSubprocess(
+            TestObjectInSubprocess._DummyCamera, name='camera')
+        processor = ObjectInSubprocess(
+            TestObjectInSubprocess._DummyProcessor, name='processor')
+        display = ObjectInSubprocess(
+            TestObjectInSubprocess._DummyGUI, name='display')
+        disk = ObjectInSubprocess(
+            TestObjectInSubprocess._DummyFileSaver, name='disk')
         resources = [camera, processor, display, disk]
         res_names = [str(r.name) for r in resources]
         acq_order = {r.name:[] for r in resources}
@@ -1016,65 +1411,8 @@ class _Tests():
             assert sorted(th_o) == th_o,\
                 f'Resource `{r}` was used out of order! -- {th_o}'
 
-    def test_shared_numpy_array_np_operations(self):
-        import pickle
-        ri = np.random.randint # Just to get short lines
-
-        original_dimensions = (3, 3, 3, 256, 256)
-        a = SharedNDArray(shape=original_dimensions, dtype='uint8')
-        c = ri(0, 255, original_dimensions, dtype='uint8')
-        a[:] = c # fill a with random values from c
-        # Views should still share memory
-        view_by_slice = a[:1, 2:3, ..., :10, 100:-100]
-        assert isinstance(a, SharedNDArray)
-        assert type(a) is type(view_by_slice)
-        assert a.shared_memory is view_by_slice.shared_memory
-
-        b = a.sum(axis=-1)
-        assert isinstance(b, np.ndarray), type(b)
-        assert not isinstance(b, SharedNDArray), type(b)
-
-        # Single number should not be returned as a shared numpy array
-        b = a.sum(axis=None)
-        assert b.shape == (), b.shape
-        assert not isinstance(b, SharedNDArray), type(b)
-
-        b = a + 1
-        assert isinstance(b, np.ndarray), type(b)
-        assert not isinstance(b, SharedNDArray), type(b)
-
-        _a = pickle.loads(pickle.dumps(a))
-        assert _a.sum() == a.sum()
-        _view_by_slice = pickle.loads(pickle.dumps(view_by_slice))
-        assert _view_by_slice.sum() == view_by_slice.sum()
-
-    def test_accessing_unlinked_memory(self):
-        import pickle
-        original_dimensions = (3, 3, 3, 256, 256)
-        a = SharedNDArray(shape=original_dimensions, dtype='uint8')
-        _a = pickle.dumps(a)
-        del a
-        try:
-            a = pickle.loads(_a)
-        except FileNotFoundError:
-            pass # we expected this error
-        else:
-            raise AssertionError('Did not get the error we expected')
-
-        p = ObjectInSubprocess(_Tests.TestClass)
-        a = SharedNDArray(shape=original_dimensions, dtype='uint8')
-        p.store_array(a)
-        p.a.sum()
-        del a
-        try:
-            p.a.sum()
-        except FileNotFoundError:
-            pass # we expected this error
-        else:
-            raise AssertionError('Did not get the error we expected')
-
     def test_sending_arrays(self):
-        p = ObjectInSubprocess(_Tests.TestClass)
+        p = ObjectInSubprocess(TestObjectInSubprocess.TestClass)
         original_dimensions = (3, 3, 3, 256, 256)
         a = SharedNDArray(shape=original_dimensions, dtype='uint8')
 
@@ -1099,154 +1437,9 @@ class _Tests():
         _a = p.sum(a)
         assert isinstance(_a, np.uint64)
 
-    def test_indexing_views_of_views(self):
-        import pickle
-        ri = np.random.randint # Just to get short lines
 
-        original_dimensions = (3, 3, 3, 256, 256)
-        a = SharedNDArray(shape=original_dimensions, dtype='uint8')
-        c = ri(0, 255, original_dimensions, dtype='uint8')
-
-        assert not np.allclose(a, c), 'Shouldnt be equal yet'
-        a[:] = c # fill a with random values from 3
-        assert np.allclose(a, c), 'Should be equal not'
-
-        b = a[:, :, :, 8:, :] # create a view of a shared_numpy_array
-        d = c[:, :, :, 8:, :] # create a view of a normal numpy array
-        assert np.allclose(b, d), 'Views should be the same'
-        assert np.allclose(
-            b[0, :, 0, :, :],
-            d[0, :, 0, :, :]
-        ), 'Indexing into a view should be the same'
-
-        assert np.allclose(
-            pickle.loads(pickle.dumps(b)), d
-        ), 'Should be the same after disonnecting and reconnecting'
-
-        assert np.allclose(
-            pickle.loads(pickle.dumps(b))[0, :, 0, :, :],
-            d[0, :, 0, :, :]
-        ), 'Indexing into a reconnected array/view should be the same'
-
-        assert np.allclose(
-            pickle.loads(pickle.dumps(b[0, :, 0, :, :])),
-            d[0, :, 0, :, :]
-        ), 'We should be able to serialize/reload a view of a view'
-
-    def run(self, test_prefix='test_'):
-        tests = [i for i in dir(self) if i.startswith(test_prefix)]
-        self.tests = len(tests)
-        for i, t in enumerate(tests):
-            self._run_single_test(i, t)
-        self._summarize_results()
-
-    def _run_single_test(self, i, t):
-        printed_output = io.StringIO()
-        name = t[5:].replace('_', ' ')
-        print(f'{f"     {i+1} of {self.tests} | Testing {name}    ":-^80s}')
-        try:
-            with redirect_stdout(printed_output):
-                expected_output = getattr(self, t)()
-            if expected_output is not None:
-                o = printed_output.getvalue()
-                assert expected_output == o, \
-                    f'\n Returned result:\n'\
-                    f'    `{repr(o)}`\n'\
-                    f' Did not match expected output:\n'\
-                    f'     "{repr(expected_output)}"\n'
-        except Exception as e:
-            print('v'*80)
-            print(traceback.format_exc().strip('\n'))
-            print('^'*80)
-            print('v'*80)
-            print(printed_output.getvalue())
-            print('^'*80)
-        else:
-            self.passed += 1
-            if printed_output.getvalue():
-                for l in printed_output.getvalue().strip('\n').split('\n'):
-                    print(f'   {l}')
-            print(f'{f"> Success <":-^80s}')
-
-    def _summarize_results(self):
-        fill = '#' if self.passed == self.tests else '!'
-        print(f'{fill}'*80)
-        message = f"Completed Tests -- passed {self.passed} of {self.tests}"
-        if fill == "#":
-            print(f'{f"  {message}  ":#^80s}')
-        else:
-            print(f'{f"  {message}  ":!^80s}')
-        print(f'{fill}'*80)
-
-
-    def time_it(self, n_loops, func, args=None, kwargs=None, fail=True,
-                timeout_us=None, name=None):
-        import time
-        try:
-            from tqdm import tqdm
-        except ImportError:
-            tqdm = None ## No progress bars :(
-
-        start = time.perf_counter()
-        if args is None:
-            args = ()
-        if kwargs is None:
-            kwargs = {}
-        if tqdm is not None:
-            f = '{desc: <38}{n: 7d}-{bar:17}|[{rate_fmt}]'
-            pb = tqdm(total=n_loops, desc=name, bar_format=f)
-        for i in range(n_loops):
-            if tqdm is not None: pb.update(1)
-            try:
-                func(*args, **kwargs)
-            except Exception as e:
-                if fail:
-                    raise e
-                else:
-                    pass
-        if not tqdm is None: pb.close()
-        end = time.perf_counter()
-        time_per_loop_us = ((end-start) / n_loops)*1e6
-
-        if timeout_us is not None:
-            if time_per_loop_us > timeout_us:
-                name = func.__name__ if name is None else name
-                raise TimeoutError(
-                    f'Timed out on {name}\n'
-                    f'   args:{args}\n'
-                    f'   kwargs: {kwargs}\n'
-                    f' Each loop took {time_per_loop_us:.2f} \u03BCs'
-                    f' (Allowed: {timeout_us:.2f} \u03BCs)')
-        return time_per_loop_us
-
-### TODO: Remove these if I can....
-class _DummyObject:
-    def __init__(self, name='generic_dummy_obj'):
-        self.name=name
-
-class _DummyCamera(_DummyObject):
-    def record(self, a):
-        import time
-        time.sleep(.05)
-        return a
-
-class _DummyProcessor(_DummyObject):
-    def process(self, a):
-        import time
-        time.sleep(.2)
-        return a
-
-class _DummyGUI(_DummyObject):
-    def display(self, a):
-        import time
-        time.sleep(.002)
-        return a
-
-class _DummyFileSaver(_DummyObject):
-    def save(self, a):
-        import time
-        time.sleep(.3)
-        return a
 
 if __name__ == '__main__':
-    _Tests().run('test_')
+    TestResultThreadandCustodyThread().run()
+    TestSharedNDArray().run()
+    TestObjectInSubprocess().run()
