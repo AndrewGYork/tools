@@ -1435,7 +1435,7 @@ class TestObjectInSubprocess(MyTestClass):
         assert _a.strides != a.strides
 
         _a = p.sum(a)
-        assert isinstance(_a, np.uint64)
+        assert np.isscalar(_a), type(_a)
 
 
 
