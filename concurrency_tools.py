@@ -21,7 +21,7 @@ except ImportError:
     shared_memory = None
     np = None
 
-"""
+'''
 Sometimes we put a computationally demanding Python object in a
 multiprocessing child process, but this usually leads to high mental
 overhead. Using pipes and queues for calling methods, getting/setting
@@ -29,73 +29,149 @@ attributes, printing, handling exceptions, and cleanup can lead to ugly
 code and confusion. Can we isolate most of this mental overhead to this
 module? If we do it right, we'll be able to write fairly sophisticated
 code that's still fairly readable. Note that the following code is
-effectively uncommented; can you still figure out what it's doing?
+very poorly commented; can you still figure out what it's doing?
 
                 ####################################################
                 #  EXAMPLE CODE (copypaste into 'test.py' and run) #
                 ####################################################
-from concurrency_tools import (
-    ObjectInSubprocess, CustodyThread, SharedNDArray)
-from dummy_module import Camera, Preprocessor, Display
+import numpy as np
+from concurrency_tools import ObjectInSubprocess, CustodyThread, SharedNDArray
 
 def main():
-    data_buffers = [
-        SharedNDArray(shape=(10, 2000, 2000), dtype='uint16'),
-        SharedNDArray(shape=(10, 2000, 2000), dtype='uint16')]
-    display_buffers = [
-        SharedNDArray(shape=(2000, 2000), dtype='uint8'),
-        SharedNDArray(shape=(2000, 2000), dtype='uint8')]
+    # Tune these values to get reliable operation on your machine:
+    fps =    500           # Camera frames per second
+    shape = (16, 512, 512) # Pixel dimensions of each data buffer
+    N =      10            # Number of data buffers to acquire
+    description = (
+        "Record -> Deconvolve -> Display -> Detect motion -> Save\n" +
+        "%d bursts of %d %dx%d frames at %d frames/second"%(N, *shape, fps))
+    ####################################################################
+    print("Simulating acquiring without concurrency...\n" + description)
+    ####################################################################
+    camera =        Camera()
+    preprocessor =  Preprocessor()
+    display =       Display()
+    postprocessor = Postprocessor()
+    storage =       Storage()
+    data_buffers = [np.zeros(shape, dtype='uint16') for x in range(N)]
 
-    camera = ObjectInSubprocess(Camera)
-    preprocessor = ObjectInSubprocess(Preprocessor)
-    display = ObjectInSubprocess(Display)
+    def timelapse(data_buffer):
+        camera.record(data_buffer, fps)
+        preprocessor.deconvolve(data_buffer)
+        display.show(data_buffer)
+        postprocessor.detect_motion(data_buffer)
+        storage.save(data_buffer)
 
-    def acquire_timelapse(data_buffer, display_buffer, custody):
-        custody.switch_from(None, to=camera)
-        camera.record(out=data_buffer)
+    for db in data_buffers:
+        timelapse(db)
+    print("Camera spends %0.0f ms working, but also spends %0.0f ms waiting!"%(
+        camera.time_working*1000, camera.time_waiting*1000))
+    ####################################################################
+    print("\nSimulating acquiring WITH concurrency...\n" + description)
+    ####################################################################
+    camera =        ObjectInSubprocess(Camera) # Can't tolerate threadswitching
+    preprocessor =  ObjectInSubprocess(Preprocessor) # CPU-bound
+    display =       ObjectInSubprocess(Display) # Slightly CPU-bound
+    postprocessor = ObjectInSubprocess(Postprocessor) # CPU-bound
+    storage =       Storage() # IO-bound, not CPU-bound
+    data_buffers = [SharedNDArray(shape, dtype='uint16') for x in range(N)]
 
-        custody.switch_from(camera, to=preprocessor)
-        preprocessor.process(data_buffer, out=display_buffer)
+    def timelapse(data_buffer, custody):
+        custody.switch_from(None, to=camera) # Wait in line to use the camera...
+        camera.record(data_buffer, fps)
+        custody.switch_from(camera, to=preprocessor) # Wait in the next line...
+        preprocessor.deconvolve(data_buffer)
+        custody.switch_from(preprocessor, to=display) # Wait in the next line...
+        display.show(data_buffer)
+        custody.switch_from(display, to=postprocessor) # Wait in the last line...
+        postprocessor.detect_motion(data_buffer)
+        custody.switch_from(postprocessor, to=None) # Use the disk immediately
+        storage.save(data_buffer)
 
-        custody.switch_from(preprocessor, to=display)
-        display.show(display_buffer)
+    threads = []
+    for db in data_buffers:
+        threads.append(CustodyThread( # This provides the "custody" object above
+            first_resource=camera, target=timelapse, args=(db,)).start())
+    for th in threads: # Wait for all our threads to finish
+        th.get_result()
+    print("Camera spends %0.0f ms working, but only spends %0.0f ms waiting."%(
+        camera.time_working*1000, camera.time_waiting*1000))
+    ####################################################################
+    # We got huge performance gains using threads, subprocesses, and
+    # shared memory. The code only got ~1.5x longer, and didn't get too
+    # ugly! This is much nicer than everything else I've tried.
+    ####################################################################
 
-        custody.switch_from(display, to=None)
+class Camera:
+    def record(self, out, fps):
+        """Reliable high-framerate recording doesn't tolerate any pauses"""
+        import time
+        dt = 1 / fps
+        frames_dropped = 0
+        start = time.perf_counter()
+        for which_frame in range(out.shape[0]):
+            t_frame_available = (1 + which_frame) * dt
+            t_frame_dropped   = (3 + which_frame) * dt
+            while time.perf_counter() - start < t_frame_available:
+                pass # Simulate polling for the next frame
+            if time.perf_counter() - start >= t_frame_dropped:
+                frames_dropped += 1
+            out[which_frame, 0::2, 1::2].fill(1) # Simulate copying a frame
+            out[which_frame, 1::2, 0::2].fill(2)
+        end = time.perf_counter()
+        if frames_dropped > 0:
+            print("Warning: the dummy camera dropped", frames_dropped, "frames")
+        # Timing bookkeeping:
+        if not hasattr(self, 'time_working'):
+            self.time_working = 0
+            self.time_waiting = 0
+        if hasattr(self, 'last_end'):
+            self.time_waiting += (start - self.last_end)
+        self.time_working += (end - start)
+        self.last_end = end
 
-    for i in range(15):
-        th0 = CustodyThread(first_resource=camera, target=acquire_timelapse,
-                            args=(data_buffers[0], display_buffers[0])).start()
-        if i > 0:
-            th1.join()
-        th1 = CustodyThread(first_resource=camera, target=acquire_timelapse,
-                            args=(data_buffers[1], display_buffers[1])).start()
-        th0.join()
-    th1.join()
+class Preprocessor:
+    def deconvolve(self, x):
+        """Live (mock) linear deconvolution is very CPU-hungry"""
+        x_ft = np.fft.rfftn(x)
+        fourier_mask = np.ones_like(x_ft) # Real decon mask would go here
+        np.multiply(x_ft, fourier_mask, out=x_ft)
+        x[:, :, :] = np.fft.irfftn(x_ft, s=x.shape)
+
+class Display:
+    def show(self, x):
+        """Log-scale and normalize data, a little CPU-hungry"""
+        im = np.log1p(x, dtype='float64')
+        im -= im.min()
+        if im.max() > 0:
+            im /= im.max()
+
+class Postprocessor:
+    def detect_motion(self, x):
+        """Motion detection is fairly CPU-hungry"""
+        mean_img = np.median(x, axis=0)
+        variance_img = np.var(x, axis=0)
+        motion_map = np.zeros_like(mean_img)
+        np.divide(variance_img, mean_img, out=motion_map, where=mean_img>10)
+        if np.max(np.abs(motion_map)) > 5: # ~1 for Poisson data
+            print("Motion detected!")
+
+class Storage:
+    def save(self, x):
+        """Saving data to disk is IO-bound rather than CPU-bound"""
+        from tempfile import TemporaryFile
+        with TemporaryFile() as f:
+            np.save(f, x)
 
 if __name__ == '__main__':
     main()
-            #####################################################
-            #  This code is imported by the example code above. #
-            #       Copypaste it into 'dummy_module.py'         #
-            #####################################################
-class Camera:
-    def record(self, out):
-        out.fill(1)
-
-class Preprocessor:
-    def process(self, x, out):
-        x.max(axis=0, out=out)
-
-class Display:
-    def show(self, image):
-        pass
                             ######################
                             #  END EXAMPLE CODE  #
                             ######################
 
 Notice how little attention this code is spending on the fact that the
-instances of the Camera, Preprocessing, and Display objects actually
-live in child processes, communicate over pipes, and synchronize access
+instances of the Camera, Preprocessing, Display, and Postprocessing objects
+actually live in child processes, communicate over pipes, and synchronize access
 to shared memory.
 
 Note that the method calls to our objects-in-subprocesses still block the parent
@@ -118,7 +194,7 @@ module, you have to protect the "entry point" of your program. The
 typical way to do this is by using an "if __name__ == '__main__':" block:
 
 import numpy as np
-from proxy_objects import ObjectInSubprocess
+from concurrency_tools import ObjectInSubprocess
 from dummy_module import Display
 
 def main():
@@ -128,7 +204,7 @@ def main():
 
 if __name__ == '__main__':
     main()
-"""
+'''
 
 class SharedNDArray(np.ndarray):
     """A numpy array that lives in shared memory
@@ -428,10 +504,10 @@ class ObjectInSubprocess:
             self._.child_process.start()
             assert _get_response(self) == 'Successfully initialized'
         # Try to ensure the child process closes when we exit:
-        connection = getattr(self, '_')
-        weakref.finalize(self, _close, connection)
+        dummy_namespace = getattr(self, '_')
+        weakref.finalize(self, _close, dummy_namespace)
         try:
-            signal.signal(signal.SIGTERM, lambda s, f: _close(connection))
+            signal.signal(signal.SIGTERM, lambda s, f: _close(dummy_namespace))
         except ValueError: # We are probably starting from a thread.
             pass # Signal handling can only happen from main thread
 
@@ -468,15 +544,15 @@ def _get_response(object_in_subprocess):
         raise resp
     return resp
 
-def _close(connection_to_subprocess):
+def _close(dummy_namespace):
     """Effectively a method of ObjectInSubprocess, but defined externally to
     minimize shadowing of the object's namespace"""
-    if not connection_to_subprocess.child_process.is_alive():
+    if not dummy_namespace.child_process.is_alive():
         return
-    with connection_to_subprocess.parent_pipe_lock:
-        connection_to_subprocess.parent_pipe.send(None)
-        connection_to_subprocess.child_process.join()
-        connection_to_subprocess.parent_pipe.close()
+    with dummy_namespace.parent_pipe_lock:
+        dummy_namespace.parent_pipe.send(None)
+        dummy_namespace.child_process.join()
+        dummy_namespace.parent_pipe.close()
 
 def _child_loop(child_pipe, initializer, initargs, initkwargs,
                 close_method_name, closeargs, closekwargs):
@@ -559,7 +635,7 @@ class _ObjectInSubprocessPipeLock:
             raise RuntimeError(
                 "Two different threads tried to use the same "
                 "ObjectInSubprocess at the same time! This is bad. Look at the "
-                "docstring of object_in_subprocess.py to see an example of how "
+                "docstring of concurrency_tools.py to see an example of how "
                 "to use a _Custody object to avoid this problem.")
         return self.lock
 
@@ -685,7 +761,7 @@ sys.excepthook = _my_excepthook
 if mp.get_start_method(allow_none=True) != 'spawn':
     mp.set_start_method('spawn')
 
-# Testing block.
+# Testing block:
 class MyTestClass:
     """Homemade testing class. Mostly written out of curiosity to see
     what features we would want and if it could be done easily without adding
@@ -694,29 +770,33 @@ class MyTestClass:
 
     To create a set of tests, subclass this class and add methods to it.
 
-    By default, methods names start with `test_` will be called by `run`.
+    By default, methods names starting with `test_` will be called by `run`.
 
     If the test is expected to generate any specific print output in STDOUT,
-    return that expected output as a string at the end of the test function.
+    return that expected output as a string from the test function.
     """
-    def run(self, test_prefix='test_'):
+    def run(self, test_prefix='test_', fail=False, fail_fast=False):
         """Runs all methods that begin with `test_prefix`"""
         tests = [i for i in dir(self) if i.startswith(test_prefix)]
         tests = [i for i in tests if callable(getattr(self, i))]
 
-        print(f'{"#":#^80s}')
+        print('#'*80)
         print(f'{f" Running Tests of {self.__class__.__name__} ":#^80s}')
-        print(f'{"#":#^80s}')
-        self.tests = len(tests)
-        self.passed = 0
+        print('#'*80)
+        self.num_tests = len(tests)
+        self.num_passed = 0
         for i, t in enumerate(tests):
-            self._run_single_test(i, t)
-        self._summarize_results()
+            passed = self._run_single_test(i, t)
+            if fail_fast and not passed:
+                raise RuntimeError("Failed!")
+        passed_all = self._summarize_results()
+        if fail and not passed_all:
+            raise RuntimeError("Failed some of the tests!")
 
     def _run_single_test(self, i, t):
         printed_output = io.StringIO()
         name = t[5:].replace('_', ' ')
-        print(f'{f"     {i+1} of {self.tests} | Testing {name}    ":-^80s}')
+        print(f'{f"     {i+1} of {self.num_tests} | Testing {name}    ":-^80s}')
         try:
             with redirect_stdout(printed_output):
                 expected_output = getattr(self, t)()
@@ -734,23 +814,27 @@ class MyTestClass:
             print('v'*80)
             print(printed_output.getvalue())
             print('^'*80)
+            return False
         else:
-            self.passed += 1
+            self.num_passed += 1
             if printed_output.getvalue():
                 for l in printed_output.getvalue().strip('\n').split('\n'):
                     print(f'   {l}')
             print(f'{f"> Success <":-^80s}')
+            return True
 
     def _summarize_results(self):
-        fill = '#' if self.passed == self.tests else '!'
-        print(f'{fill}'*80)
+        fill = '#' if self.num_passed == self.num_tests else '!'
+        print(fill*80)
         message = (f"Completed Tests for {self.__class__.__name__} "
-                   f"-- passed {self.passed} of {self.tests}")
-        if fill == "#":
+                   f"-- passed {self.num_passed} of {self.num_tests}")
+        if self.num_passed == self.num_tests:
             print(f'{f"  {message}  ":#^80s}')
         else:
             print(f'{f"  {message}  ":!^80s}')
-        print(f'{fill}'*80)
+        print(fill*80)
+        print()
+        return self.num_passed == self.num_tests
 
 
     def time_it(self, n_loops, func, args=None, kwargs=None, fail=True,
@@ -770,9 +854,7 @@ class MyTestClass:
         try:
             from tqdm import tqdm
         except ImportError:
-            tqdm = None ## No progress bars :(
-
-        start = time.perf_counter()
+            tqdm = None # No progress bars :(
         if args is None:
             args = ()
         if kwargs is None:
@@ -780,6 +862,7 @@ class MyTestClass:
         if tqdm is not None:
             f = '{desc: <38}{n: 7d}-{bar:17}|[{rate_fmt}]'
             pb = tqdm(total=n_loops, desc=name, bar_format=f)
+        start = time.perf_counter()
         for i in range(n_loops):
             if tqdm is not None: pb.update(1)
             try:
@@ -789,10 +872,9 @@ class MyTestClass:
                     raise e
                 else:
                     pass
-        if not tqdm is None: pb.close()
         end = time.perf_counter()
+        if tqdm is not None: pb.close()
         time_per_loop_us = ((end-start) / n_loops)*1e6
-
         if timeout_us is not None:
             if time_per_loop_us > timeout_us:
                 name = func.__name__ if name is None else name
@@ -805,11 +887,21 @@ class MyTestClass:
         return time_per_loop_us
 
 
-class TestResultThreadandCustodyThread(MyTestClass):
-    """Various test of the functions and expected behavior of the ResultThread
+class TestResultThreadAndCustodyThread(MyTestClass):
+    """Various tests of the functions and expected behavior of the ResultThread
     and CustodyThread classes.
     """
-    def test_thread_behavior(self):
+    def test_subclassed_threading_types(self):
+        r_th = ResultThread(target=lambda: 1)
+        c_th = CustodyThread(target=lambda custody: 1)
+
+        assert isinstance(r_th, threading.Thread)
+        assert isinstance(c_th, threading.Thread)
+        assert isinstance(r_th, ResultThread)
+        assert isinstance(c_th, ResultThread)
+        assert isinstance(c_th, CustodyThread)
+
+    def test_threadlike_behavior(self):
         th = ResultThread(target=lambda: 1)
         th.start()
         th.join()
@@ -817,13 +909,13 @@ class TestResultThreadandCustodyThread(MyTestClass):
 
     def test_new_start_behavior(self):
         th = ResultThread(target=lambda: 1)
-        assert hasattr(th, '_return')
         _th = th.start()
         assert isinstance(_th, ResultThread)
         assert th is _th
 
     def test_getting_result(self):
         th = ResultThread(target=lambda: 1).start()
+        assert hasattr(th, '_return')
         th.join()
         assert th.get_result() == 1
         assert th.get_result() == 1, "Couldn't get result twice!"
@@ -840,16 +932,16 @@ class TestResultThreadandCustodyThread(MyTestClass):
 
     def test_catching_exception(self):
         def e():
-            raise ValueError('TEST')
+            raise ValueError("Don't worry, this exception occurred on purpose!")
         th = ResultThread(target=e).start()
-        th.join() # join is just join
+        th.join() # join won't reraise exception in main thread
         assert hasattr(th, 'exc_value')
         try:
             th.get_result()
         except ValueError:
             pass
         else:
-            raise AssertionError('We didnt get the exception....')
+            raise AssertionError("We didn't get the exception we expected...")
         # We should be able to reraise this exception as long as we have
         # a reference to it:
         try:
@@ -857,114 +949,101 @@ class TestResultThreadandCustodyThread(MyTestClass):
         except ValueError:
             pass
         else:
-            raise AssertionError('We didnt get the exception....')
-
-    def test_reaching_system_threadlimit(self):
-        """ I can't get this test to "pass" """
-        import time
-        exit = False
-        def f():
-            while not exit:
-                time.sleep(0.05)
-
-        try:
-            ths = [ResultThread(target=f).start() for i in range(int(1e3))]
-        except RuntimeError:
-            pass
-        else:
-            raise AssertionError('We didnt reach the thread limit!')
-        finally:
-            exit = True
+            raise AssertionError("We didn't get the exception we expected...")
 
     def test_custody_thread_target_args(self):
-        # accepts a target with custody kwargs
+        # CustodyThread accepts a target with a kwarg 'custody'
         def custody_f(custody=None):
             return 1
         th = CustodyThread(target=custody_f, first_resource=None).start()
-
-        # accepts a target with a custody positional argument
+        # CustodyThread accepts a target with a positional arg 'custody'
         def custody_f(custody):
             return 1
         th = CustodyThread(target=custody_f, first_resource=None).start()
 
+        # CustodyThread will otherwise raise a ValueError
         def f():
             return 1
         try:
             th = CustodyThread(target=f, first_resource=None).start()
         except ValueError:
-            pass # we expect this
+            pass # We expect this
         else:
-            raise AssertionError('We didnt get the exception....')
+            raise AssertionError("We didn't get the exception we expected...")
         def f(a):
             return 1
         try:
             th = CustodyThread(target=f, first_resource=None).start()
         except ValueError:
-            pass # we expect this
+            pass # We expect this
         else:
-            raise AssertionError('We didnt get the exception....')
+            raise AssertionError("We didn't get the exception we expected...")
         def f(a=1):
             return 1
         try:
             th = CustodyThread(target=f, first_resource=None).start()
         except ValueError:
-            pass # we expect this
+            pass # We expect this
         else:
-            raise AssertionError('We didnt get the exception....')
-            th.join()
-        res = th.get_result()
-        assert res == 1, f"{res} != expected result (1)"
+            raise AssertionError("We didn't get the exception we expected...")
 
     def test_providing_first_resource(self):
         resource = _WaitingList()
-        t = {'step': 0, 'progress': 0}
+        mutable_variables = {'step': 0, 'progress': 0}
         def f(custody):
-            while t['step'] == 0:
+            while mutable_variables['step'] == 0:
                 pass
-            t['progress'] += 1
             custody.switch_from(None, resource)
-            while t['step'] == 1:
+            mutable_variables['progress'] += 1
+            while mutable_variables['step'] == 1:
                 pass
-            t['progress'] += 1
             custody.switch_from(resource, None)
+            mutable_variables['progress'] += 1
             return
         try:
             th = CustodyThread(target=f, first_resource=resource).start()
             assert hasattr(th, "custody"), 'Should have a custody attribute.'
             assert not th.custody.has_custody, 'Should not have custody yet.'
-            assert th.custody.target_resource is resource, 'Should be in line'
+            assert th.custody.target_resource is resource, 'Should be in line.'
             # Make target thread progress one step and acquire custody
-            t['step'] += 1
-            while t['progress'] == 0:
-                pass # wait for thread
+            mutable_variables['step'] = 1
+            while mutable_variables['progress'] == 0:
+                pass # Wait for thread
             assert th.custody.has_custody, 'Should have gotten custody.'
             assert th.custody.target_resource is resource
-            t['step'] += 1 # make target progress to next step and exit
+            # Make target thread progress one step, release custody, and exit
+            mutable_variables['step'] = 2
+            while mutable_variables['progress'] == 1:
+                pass # Wait for thread
+            assert not th.custody.has_custody
+            assert th.custody.target_resource is None
             th.join()
         finally: # if anything goes wrong, make sure the thread exits
-            t['step'] = -1
+            mutable_variables['step'] = -1
 
 class TestSharedNDArray(MyTestClass):
-    """Various tests of the SharedNumpyArray class """
-    def test_types(self):
+    """Various tests of the SharedNDArray class"""
+    def test_subclassed_numpy_array_types(self):
         a = SharedNDArray(shape=(1,), dtype='uint8')
         assert isinstance(a, SharedNDArray)
         assert isinstance(a, np.ndarray)
-
+        assert type(a) is SharedNDArray, type(a)
+        assert type(a) is not np.ndarray
         assert hasattr(a, "shared_memory")
         assert isinstance(a.shared_memory, shared_memory.SharedMemory)
 
-    def test_preserved_ndarray_behavior(self):
-        """Making sure we didn't break anything"""
+    def test_ndarraylike_behavior(self):
+        """Testing if we broke how an ndarray is supposed to behave."""
         ri = np.random.randint # Just to get short lines
         original_dimensions = (3, 3, 3, 256, 256)
         a = SharedNDArray(shape=original_dimensions, dtype='uint8')
         c = ri(0, 255, original_dimensions, dtype='uint8')
-        a[:] = c # fill a with random values from c
-        # Views should still share memory
+        a[:] = c # Fill 'a' with 'c's random values
+        # A slice should still share memory
         view_by_slice = a[:1, 2:3, ..., :10, 100:-100]
         assert isinstance(a, SharedNDArray)
         assert type(a) is type(view_by_slice)
+        assert np.may_share_memory(a, view_by_slice)
         assert a.shared_memory is view_by_slice.shared_memory
 
         # Some functions should not return a SharedNDArray
@@ -981,26 +1060,27 @@ class TestSharedNDArray(MyTestClass):
         assert not isinstance(b, SharedNDArray)
 
     def test_serialization(self):
+        """Testing serializing/deserializing a SharedNDArray"""
         import pickle
         ri = np.random.randint # Just to get short lines
         original_dimensions = (3, 3, 3, 256, 256)
         a = SharedNDArray(shape=original_dimensions, dtype='uint8')
         c = ri(0, 255, original_dimensions, dtype='uint8')
-        a[:] = c # fill a with random values from c
-        # Views should still share memory
+        a[:] = c # Fill 'a' with 'c's random values
         view_by_slice = a[:1, 2:3, ..., :10, 100:-100]
         view_of_a_view = view_by_slice[..., 1:, 10:-10:3]
+
         _a = pickle.loads(pickle.dumps(a))
         assert _a.sum() == a.sum()
-        assert np.allclose(a, _a)
+        assert np.array_equal(a, _a)
 
         _view_by_slice = pickle.loads(pickle.dumps(view_by_slice))
         assert _view_by_slice.sum() == view_by_slice.sum()
-        assert np.allclose(_view_by_slice, view_by_slice)
+        assert np.array_equal(_view_by_slice, view_by_slice)
 
         _view_of_a_view = pickle.loads(pickle.dumps(view_of_a_view))
         assert _view_of_a_view.sum() == view_of_a_view.sum()
-        assert np.allclose(_view_of_a_view, view_of_a_view)
+        assert np.array_equal(_view_of_a_view, view_of_a_view)
 
     def test_viewcasting(self):
         a = SharedNDArray(shape=(1,))
@@ -1018,26 +1098,43 @@ class TestSharedNDArray(MyTestClass):
     def test_auto_unlinking_memory(self):
         import gc
         a = SharedNDArray(shape=(1,))
-        name = a.shared_memory.name
+        name = str(a.shared_memory.name) # Really make sure we don't get a ref
         del a
-        gc.collect()
+        gc.collect() # Now memory should be unlinked
         try:
             shared_memory.SharedMemory(name=name)
         except FileNotFoundError:
-            pass # this is the error we expected if the memory was released.
+            pass # This is the error we expected if the memory was unlinked.
         else:
             raise AssertionError("We didn't raise the correct exception!")
 
-    def test_accessing_unlinked_memory(self):
+        # Views should prevent deallocation
+        a = SharedNDArray(shape=(10,))
+        v = a[:5]
+        name = str(a.shared_memory.name) # Really make sure we don't get a ref
+        del a
+        gc.collect()
+        v.sum() # Should still be able to interact with 'v'
+        shared_memory.SharedMemory(name=name) # Memory not unlinked yet
+        del v
+        gc.collect() # Now memory should be unlinked
+        try:
+            shared_memory.SharedMemory(name=name)
+        except FileNotFoundError:
+            pass # This is the error we expected if the memory was unlinked.
+        else:
+            raise AssertionError("We didn't raise the correct exception!")
+
+    def test_accessing_unlinked_memory_during_deserialization(self):
         import pickle
         original_dimensions = (3, 3, 3, 256, 256)
         a = SharedNDArray(shape=original_dimensions, dtype='uint8')
-        _a = pickle.dumps(a)
+        string_of_a = pickle.dumps(a)
         del a
         try:
-            a = pickle.loads(_a)
+            _a = pickle.loads(string_of_a)
         except FileNotFoundError:
-            pass # we expected this error
+            pass # We expected this error
         else:
             raise AssertionError('Did not get the error we expected')
 
@@ -1053,10 +1150,22 @@ class TestSharedNDArray(MyTestClass):
         except FileNotFoundError:
             pass # we expected this error
         else:
-            if os.name != 'nt': # This is allowed on windows.
+            if os.name == 'nt':
+                # This is allowed on Windows. Windows will keep memory
+                # allocated until all references have been lost from every
+                # process.
+                pass
+            else:
+                # However, on posix systems, we expect the system to unlink
+                # the memory once the process that originally allocated it
+                # loses all references to the array.
                 raise AssertionError('Did not get the error we expected')
 
-    def test_reconnnecting_and_disconnecting_views(self):
+
+    def test_serializing_and_deserializing(self):
+        """Test serializing/deserializing arrays with random shapes, dtypes, and
+        slicing operators.
+        """
         for i in range(500):
             self._trial_slicing_of_shared_array()
 
@@ -1064,7 +1173,7 @@ class TestSharedNDArray(MyTestClass):
         import pickle
         ri = np.random.randint # Just to get short lines
         dtype = np.dtype(np.random.choice(
-            [np.uint16, np.uint8, float, np.float32, np.float64]))
+            [int, np.uint8, np.uint16, float, np.float32, np.float64]))
         original_dimensions = tuple(
             ri(2, 100) for d in range(ri(2, 5)))
         slicer = tuple(
@@ -1076,10 +1185,10 @@ class TestSharedNDArray(MyTestClass):
             for a in original_dimensions)
         a = SharedNDArray(shape=original_dimensions, dtype=dtype)
         a.fill(0)
-        b = a[slicer] ## should be a view
+        b = a[slicer] # Should be a view
         b.fill(1)
         expected_total = int(b.sum())
-        reloaded_total = pickle.loads(pickle.dumps(b)).sum()
+        reloaded_total = int(pickle.loads(pickle.dumps(b)).sum())
         assert expected_total == reloaded_total, \
             f'Failed {dtype.name}/{original_dimensions}/{slicer}'
 
@@ -1095,27 +1204,27 @@ class TestObjectInSubprocess(MyTestClass):
         def printing_method(self, *args, **kwargs):
             print(*args, **kwargs)
 
-        def printing_method2(self):
-            print('Hello world 2', end='', flush=False)
-            print(end='', flush=True)
+        def get_attribute(self, attr):
+            return getattr(self, attr, None)
 
-        def test_method(self, *args, **kwargs):
+        def mirror(self, *args, **kwargs):
             return (args, kwargs)
 
-        def test_shared_numpy_input(self, shared_numpy_array):
-            return shared_numpy_array.shape
+        def black_hole(self, *args, **kwargs):
+            return None
 
-        def test_shared_numpy_return(self, shape=(5,5)):
-            return SharedNDArray(shape=shape)
+        def get_shape_of_numpy_array(self, ndarray):
+            return ndarray.shape
 
-        def test_modify_array(self, a):
-            a.fill(1)
+        def fill_and_return_array(self, a, i=1):
+            a.fill(i)
             return a
 
-        def test_return_array(self, a):
-            return a
+        def sleep(self, seconds):
+            import time
+            time.sleep(seconds)
 
-        def test_return_slice(self, a, *args):
+        def return_slice(self, a, *args):
             return a[args]
 
         def sum(self, a):
@@ -1131,132 +1240,106 @@ class TestObjectInSubprocess(MyTestClass):
             if crash:
                 raise ValueError('This error was supposed to be raised')
 
-    class _DummyObject:
-        def __init__(self, name='generic_dummy_obj'):
-            self.name = name
-
-    class _DummyCamera(_DummyObject):
-        def record(self, a):
-            import time
-            time.sleep(.05)
-            return a
-
-    class _DummyProcessor(_DummyObject):
-        def process(self, a):
-            import time
-            time.sleep(.2)
-            return a
-
-    class _DummyGUI(_DummyObject):
-        def display(self, a):
-            import time
-            time.sleep(.002)
-            return a
-
-    class _DummyFileSaver(_DummyObject):
-        def save(self, a):
-            import time
-            time.sleep(.3)
-            return a
-
-    def test_create_object_in_subprocess(self):
+    def test_create_and_close_object_in_subprocess(self):
+        import gc
         p = ObjectInSubprocess(TestObjectInSubprocess.TestClass)
+        dummy_namespace = p._
+        del p
+        gc.collect()
+        dummy_namespace.child_process.join(timeout=1)
+        assert not dummy_namespace.child_process.is_alive()
 
     def test_passing_normal_numpy_array(self):
-        shape = (10, 10)
-        dtype = int
-        sz = int(np.prod(shape, dtype='uint64')*np.dtype(int).itemsize)
-        a = np.zeros(shape, dtype)
+        a = np.zeros((3, 3), dtype=int)
         p = ObjectInSubprocess(TestObjectInSubprocess.TestClass)
-        p.test_shared_numpy_input(a)
+        (_a,), _ = p.mirror(a)
+        assert np.array_equal(a, _a), f"{a} != {_a} ({a.dtype}|{_a.dtype}"
 
-    def test_passing_retrieving_shared_array(self):
-        shape = (10, 10)
-        dtype = int
-        sz = int(np.prod(shape, dtype='uint64')*np.dtype(int).itemsize)
+    def test_passing_modifying_and_retrieving_shared_array(self):
+        a = SharedNDArray(shape=(10, 10), dtype=int)
         p = ObjectInSubprocess(TestObjectInSubprocess.TestClass)
-        a = SharedNDArray(shape=shape, dtype=dtype)
-        a.fill(0)
-        a = p.test_modify_array(a)
-        assert a.sum() == np.product(shape, dtype='uint64'), (
-            'Contents of array not correct!')
+        b = p.fill_and_return_array(a, 1)
+        assert np.array_equal(a, b)
 
-    def test_raise_attribute_error(self):
-        a = ObjectInSubprocess(
+    def test_attribute_access(self):
+        p = ObjectInSubprocess(
             TestObjectInSubprocess.TestClass, 'attribute', x=4)
+        assert p.x == 4
+        assert getattr(p, 'arg_0') == 'attribute'
         try:
-            a.z
+            p.z
         except AttributeError as e: # Get __this__ specific error
-            print("Attribute error handled by parent process:\n ", e)
+            print("Expected attribute error handled by parent process:\n ", e)
+        else:
+            raise AssertionError('Did not get the error we expected')
 
-    def test_printing_in_child_process(self):
-        a = ObjectInSubprocess(
-            TestObjectInSubprocess.TestClass, 'attribute', x=4)
-        b = ObjectInSubprocess(
-            TestObjectInSubprocess.TestClass, x=5)
-        b.printing_method('Hello')
-        a.printing_method('A')
-        a.printing_method('Hello', 'world', end='', flush=True)
-        a.printing_method('')
-        a.printing_method(a.x, '... ', end='', flush=False)
-        b.printing_method(b.x)
-        expected_output = 'Hello\nA\nHello world\n4 ... 5\n'
+    def test_printing_in_child_processes(self):
+        a = ObjectInSubprocess(TestObjectInSubprocess.TestClass)
+        b = ObjectInSubprocess(TestObjectInSubprocess.TestClass)
+        expected_output = ''
+        b.printing_method( 'Hello')
+        expected_output += 'Hello\n'
+        a.printing_method( 'Hello from subprocess a.')
+        expected_output += 'Hello from subprocess a.\n'
+        b.printing_method( 'Hello from subprocess b.')
+        expected_output += 'Hello from subprocess b.\n'
+        a.printing_method( 'Hello world', end=', ', flush=True)
+        expected_output += 'Hello world, '
+        b.printing_method( 'Hello world!', end='', flush=True)
+        expected_output += 'Hello world!'
         return expected_output
 
     def test_setting_attribute_of_object_in_subprocess(self):
-        a = ObjectInSubprocess(
-            TestObjectInSubprocess.TestClass, 'attribute', x=4)
-        a.z = 10
-        assert a.z == 10
-        setattr(a, 'z', 100)
-        assert a.z == 100
+        p = ObjectInSubprocess(TestObjectInSubprocess.TestClass)
+        assert not hasattr(p, 'z')
+        p.z = 10
+        assert hasattr(p, 'z')
+        assert p.z == 10
+        setattr(p, 'z', 100)
+        assert p.z == 100
+        assert p.get_attribute('z') == 100
 
-    def test_getting_attribute_of_object_in_subprocess(self):
-        a = ObjectInSubprocess(
-            TestObjectInSubprocess.TestClass, 'attribute', x=4)
-        assert a.x == 4
-        assert getattr(a, 'x') == 4
-
-    def testing_array_values_after_passing_to_subprocess(self):
-        p = ObjectInSubprocess(_Tests.TestClass)
+    def test_array_values_after_passing_to_subprocess(self):
+        p = ObjectInSubprocess(TestObjectInSubprocess.TestClass)
         a = SharedNDArray(shape=(10, 1))
         a[:] = 1
         assert a.sum() == p.sum(a)
 
     def test_object_in_subprocess_overhead(self):
+        """Test the overhead of accessing ObjectInSubprocess methods/attributes.
+        """
         print('Performance summary:')
         n_loops = 10000
-        a = ObjectInSubprocess(
-            TestObjectInSubprocess.TestClass, 'attribute', x=4)
+        p = ObjectInSubprocess(TestObjectInSubprocess.TestClass, x=4)
         t = self.time_it(
-            n_loops, a.test_method, timeout_us=100, name='Trivial method call')
-        print(f" {t:.2f} \u03BCs per trivial method call.")
-        t = self.time_it(
-            n_loops, lambda: a.x, timeout_us=100, name='Attribute access')
+            n_loops, lambda: p.x, timeout_us=100, name='Attribute access')
         print(f" {t:.2f} \u03BCs per get-attribute.")
-        a.x = 4 ## test set attribute with normal syntax
-        t = self.time_it(n_loops, lambda: setattr(a, 'x', 5),
+        t = self.time_it(n_loops, lambda: setattr(p, 'x', 5),
                          timeout_us=100, name='Attribute setting')
         print(f" {t:.2f} \u03BCs per set-attribute.")
-        t = self.time_it(n_loops, lambda: a.z, fail=False, timeout_us=200,
+        t = self.time_it(n_loops, lambda: p.z, fail=False, timeout_us=200,
                          name='Attribute error')
         print(f" {t:.2f} \u03BCs per parent-handled exception.")
+        t = self.time_it(
+            n_loops, p.mirror, timeout_us=100, name='Trivial method call')
+        print(f" {t:.2f} \u03BCs per trivial method call.")
         self._test_passing_array_performance()
 
     def _test_passing_array_performance(self):
+        """Test the performance of passing random arrays to/from
+        ObjectInSubprocess.
+        """
         from itertools import product
-        shape = (1000, 1000)
-        dtype = np.uint8
-        pass_methods = ['reference', 'serialization']
-        method_names = ['test_shared_numpy_input', 'test_modify_array']
+        pass_by = ['reference', 'serialization']
+        methods = ['black_hole', 'mirror']
         shapes = [(10, 10), (1000, 1000)]
-        for s, f, m in product(shapes, method_names, pass_methods):
-            self._test_array_passing(m, f, s, dtype, 1000)
+        for s, pb, m in product(shapes, pass_by, methods):
+            self._test_array_passing(s, pb, m, 'uint8', 1000)
 
-    def _test_array_passing(self, pass_by, method_name, shape, dtype, n_loops):
+    def _test_array_passing(self, shape, pass_by, method_name, dtype, n_loops):
         dtype = np.dtype(dtype)
         sz = int(np.prod(shape, dtype='uint64')*np.dtype(int).itemsize)
-        direction = '<->' if method_name == 'test_modify_array' else '->'
+        direction = '<->' if method_name == 'mirror' else '->'
         name = f'{shape} array {direction} {pass_by}'
         shm_obj = ObjectInSubprocess(TestObjectInSubprocess.TestClass)
         if pass_by == 'reference':
@@ -1271,6 +1354,9 @@ class TestObjectInSubprocess(MyTestClass):
         print(f' {t_per_loop:.2f} \u03BCs per {name}')
 
     def test_lock_with_waitlist(self):
+        """Test that CustodyThreads stay in order while using resources.
+        ObjectsInSubprocess are just mocked as _WaitingList objects.
+        """
         import time
         try:
             from tqdm import tqdm
@@ -1280,35 +1366,39 @@ class TestObjectInSubprocess(MyTestClass):
         camera_lock = _WaitingList()
         display_lock = _WaitingList()
 
+        num_snaps = 100
+        usage_record = {'camera': [], 'display': []}
+        if tqdm is not None:
+            pbars = {
+                resource: tqdm(
+                    total=num_snaps, bar_format='{desc: <30}{n: 3d}-{bar:45}|',
+                    desc=f'Threads waiting on {resource}')
+                for resource in usage_record.keys()}
+
         def snap(i, custody):
-            if not tqdm is None: pbars['camera'].update(1)
-            if not tqdm is None: pbars['camera'].refresh()
-            # We're already in line for the camera; wait until you're first in line
+            if tqdm is not None: pbars['camera'].update(1)
+            if tqdm is not None: pbars['camera'].refresh()
+            # We're already in line for the camera; wait until we're first
             custody.switch_from(None, camera_lock)
-            # Use the resource
+            # Pretend to use the resource
             time.sleep(0.02)
-            order['camera'].append(i)
-            if not tqdm is None: pbars['camera'].update(-1)
-            if not tqdm is None: pbars['display'].update(1)
-            if not tqdm is None: pbars['camera'].refresh()
-            if not tqdm is None: pbars['display'].refresh()
-            custody.switch_from(camera_lock, display_lock)
-            # Use the resource
+            usage_record['camera'].append(i)
+
+            custody.switch_from(camera_lock, display_lock, wait=False)
+            if tqdm is not None: pbars['camera'].update(-1)
+            if tqdm is not None: pbars['camera'].refresh()
+            if tqdm is not None: pbars['display'].update(1)
+            if tqdm is not None: pbars['display'].refresh()
+            custody._wait_in_line()
+            # Pretend to use the resource
             time.sleep(0.05)
-            order['display'].append(i)
+            usage_record['display'].append(i)
             # Move to the next resource
             custody.switch_from(display_lock, None)
-            if not tqdm is None: pbars['display'].update(-1)
-            if not tqdm is None: pbars['display'].refresh()
+            if tqdm is not None: pbars['display'].update(-1)
+            if tqdm is not None: pbars['display'].refresh()
             return None
 
-        num_snaps = 100
-        order = {'camera': [], 'display': []}
-        if not tqdm is None:
-            f = '{desc: <30}{n: 3d}-{bar:45}|'
-            pbars = {n: tqdm(total=num_snaps, unit='th',
-                             bar_format=f, desc=f'Threads waiting on {n}')
-                     for n in order.keys()}
         threads = []
         for i in range(num_snaps):
             threads.append(CustodyThread(
@@ -1316,130 +1406,55 @@ class TestObjectInSubprocess(MyTestClass):
         for th in threads:
             th.get_result()
 
-        if not tqdm is None:
+        if tqdm is not None:
             for pb in pbars.values(): pb.close()
 
-        assert order['camera'] == list(range(num_snaps))
-        assert order['display'] == list(range(num_snaps))
+        assert usage_record['camera'] == list(range(num_snaps))
+        assert usage_record['display'] == list(range(num_snaps))
 
     def test_incorrect_thread_management(self):
-
-        shm_obj = ObjectInSubprocess(TestObjectInSubprocess.TestClass)
-        shm_obj.x = 5
-        exceptions = [1]
-        def t():
+        """Test accessing an object in a subprocess from multiple threads
+        without using a custody object. This is expected to raise a
+        RunTimeError.
+        """
+        p = ObjectInSubprocess(TestObjectInSubprocess.TestClass)
+        exceptions = []
+        def unsafe_fn():
             try:
-                shm_obj.x
-            except RuntimeError: ## Should raise this
-                pass
-            else:
+                p.sleep(.1)
+            except RuntimeError: # Should raise this sometimes
                 exceptions.append(1)
-        for i in range(100):
-            threading.Thread(target=t).start()
-        if sum(exceptions) == 0:
-            raise UserWarning('No exceptions raised.'
-                              'Expected some RuntimeErrors')
+        threads = [threading.Thread(target=unsafe_fn) for i in range(20)]
+        for th in threads: th.start()
+        for th in threads: th.join()
+        assert len(exceptions) == 19, 'This should have raised some exceptions.'
 
-    def test_object_with_lock_with_waitlist(self):
-        import time
-        try:
-            from tqdm import tqdm
-        except ImportError:
-            tqdm = None ## No progress bars :(
+    def test_sending_shared_arrays(self):
+        """Testing sending a SharedNDArray to a ObjectInSubprocess."""
 
-        def snap(i, custody):
-            prev_res = None
-            itr = enumerate(zip(resources, res_names, funcs))
-            for ri, (res, name, resource_funcs) in itr:
-                if not tqdm is None:
-                    pbars[name].update(1) # Be careful to access the resource
-                    pbars[name].refresh() # before you have control of it.
-                custody.switch_from(prev_res, res)
-                for fname in resource_funcs:
-                    a = getattr(res, fname)(i)
-                results[i].append(a)
-                acq_order[res.name].append(i)
-                if not tqdm is None:
-                    pbars[res.name].update(-1)
-                    pbars[res.name].refresh()
-                prev_res = res
-            custody.switch_from(res, None)
-
-        NUM_STEPS = 4 # matches the number of steps for check results.
-        num_snaps = 30  # Number of threads to start
-
-        # Create objects in subprocesses that are mocked resources to use.
-        # Each has a method that sleep for some amount of time and
-        # returns `True`.
-        camera = ObjectInSubprocess(
-            TestObjectInSubprocess._DummyCamera, name='camera')
-        processor = ObjectInSubprocess(
-            TestObjectInSubprocess._DummyProcessor, name='processor')
-        display = ObjectInSubprocess(
-            TestObjectInSubprocess._DummyGUI, name='display')
-        disk = ObjectInSubprocess(
-            TestObjectInSubprocess._DummyFileSaver, name='disk')
-        resources = [camera, processor, display, disk]
-        res_names = [str(r.name) for r in resources]
-        acq_order = {r.name:[] for r in resources}
-        results = [[] for i in range(num_snaps)]
-        funcs = [('record',), # methods to call for camera
-                 ('process', ), # methods to call for processor
-                 ('display', ), # methods to call for display
-                 ('save', ) # methods to call for for disk.
-            ]
-        if not tqdm is None:
-            f = '{desc: <30}{n: 3d}-{bar:45}|'
-            pbars = {n: tqdm(total=num_snaps, unit='th',
-                              bar_format=f, desc=f'Threads waiting on {n}')
-                     for n in acq_order.keys()}
-        threads = []
-        for i in range(num_snaps):
-            th = CustodyThread(target=snap, first_resource=camera, args=(i,)
-                ).start()
-            threads.append(th)
-        for th in threads:
-            th.get_result()
-
-        if not tqdm is None:
-            for pb in pbars.values(): pb.close()
-
-        # Check results
-        for i, a in enumerate(results):
-            assert sum(a) == NUM_STEPS*i, f'{i}-{a}'
-        for r, th_o in acq_order.items():
-            assert sorted(th_o) == th_o,\
-                f'Resource `{r}` was used out of order! -- {th_o}'
-
-    def test_sending_arrays(self):
         p = ObjectInSubprocess(TestObjectInSubprocess.TestClass)
         original_dimensions = (3, 3, 3, 256, 256)
         a = SharedNDArray(shape=original_dimensions, dtype='uint8')
 
-        _a = p.test_return_array(a)
+        (_a,), _ = p.mirror(a)
         assert isinstance(_a, SharedNDArray)
         assert _a.shared_memory.name == a.shared_memory.name
         assert _a.offset == a.offset
         assert _a.strides == a.strides
 
-        _a = p.test_modify_array(a)
+        _a = p.fill_and_return_array(a, 1)
         assert isinstance(_a, SharedNDArray)
         assert _a.shared_memory.name == a.shared_memory.name
         assert _a.offset == a.offset
         assert _a.strides == a.strides
 
-        _a = p.test_return_slice(a, slice(1, -1), ..., slice(3, 100, 10))
+        _a = p.return_slice(a, slice(1, -1), ..., slice(3, 100, 10))
         assert isinstance(_a, SharedNDArray)
         assert _a.shared_memory.name == a.shared_memory.name
         assert _a.offset != a.offset
         assert _a.strides != a.strides
 
-        _a = p.sum(a)
-        assert np.isscalar(_a), type(_a)
-
-
-
 if __name__ == '__main__':
-    TestResultThreadandCustodyThread().run()
+    TestResultThreadAndCustodyThread().run()
     TestSharedNDArray().run()
     TestObjectInSubprocess().run()
