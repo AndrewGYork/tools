@@ -1150,6 +1150,7 @@ class TestSharedNDArray(MyTestClass):
         except FileNotFoundError:
             pass # we expected this error
         else:
+            import os
             if os.name == 'nt':
                 # This is allowed on Windows. Windows will keep memory
                 # allocated until all references have been lost from every
