@@ -256,7 +256,7 @@ class SharedNDArray(np.ndarray):
                 shm = shared_memory.SharedMemory(
                     create=True, size=requested_bytes)
             except OSError as e:
-                if e.args == (24, 'Too many open files'):
+                if e.args == (24, "Too many open files"):
                     raise OSError(
                         "You tried to simultaneously open more "
                         "SharedNDArrays than are allowed by your system!"
@@ -282,11 +282,11 @@ class SharedNDArray(np.ndarray):
         if not isinstance(obj, SharedNDArray):
             raise ValueError(
                 "You can't view non-shared memory as shared memory.")
-        if hasattr(obj, 'shared_memory') and  np.may_share_memory(self, obj):
+        if hasattr(obj, "shared_memory") and  np.may_share_memory(self, obj):
             self.shared_memory = obj.shared_memory
             self.offset = obj.offset
-            self.offset += (self.__array_interface__['data'][0] -
-                             obj.__array_interface__['data'][0])
+            self.offset += (self.__array_interface__["data"][0] -
+                             obj.__array_interface__["data"][0])
 
     def __array_wrap__(self, arr, context=None):
         arr = super().__array_wrap__(arr, context)
@@ -307,7 +307,7 @@ class SharedNDArray(np.ndarray):
 
     def __getitem__(self, index):
         res = super().__getitem__(index)
-        if type(res) is SharedNDArray and not hasattr(res, 'shared_memory'):
+        if type(res) is SharedNDArray and not hasattr(res, "shared_memory"):
             return res.view(type=np.ndarray)
         return res
 
@@ -388,17 +388,17 @@ class ResultThread(threading.Thread):
             super().start()
         except RuntimeError as e:
             if e.args == ("can't start new thread",):
-                print('*'*80)
-                print('Failed to launch a thread.')
-                print(threading.active_count(), 'threads are currently active.')
-                print('You might have reached a limit of your system;')
-                print('let some of your threads finish before launching more.')
-                print('*'*80)
+                print("*"*80)
+                print("Failed to launch a thread.")
+                print(threading.active_count(), "threads are currently active.")
+                print("You might have reached a limit of your system;")
+                print("let some of your threads finish before launching more.")
+                print("*"*80)
             raise
         return self
 
     def get_result(self, timeout=None):
-        """ Either returns a value or raises an exception.
+        """Either returns a value or raises an exception.
 
         Optionally accepts a timeout in seconds. If thread has not returned
         after timeout seconds, raises a TimeoutError.
@@ -417,7 +417,7 @@ class CustodyThread(ResultThread):
     """
     def __init__(self, first_resource=None,
                  group=None, target=None, name=None, args=(), kwargs=None):
-        if 'custody' not in inspect.signature(target).parameters:
+        if "custody" not in inspect.signature(target).parameters:
             raise ValueError("The function 'target' passed to a CustodyThread"
             " must accept an argument named 'custody'")
         custody = _Custody() # Useful for synchronization in the launched thread
@@ -427,12 +427,12 @@ class CustodyThread(ResultThread):
             # thread should do the waiting, not the main thread:
             custody.switch_from(None, first_resource, wait=False)
         if kwargs is None: kwargs = {}
-        if 'custody' in kwargs:
+        if "custody" in kwargs:
             raise ValueError(
                 "CustodyThread will create and pass a keyword argument to"
                 " 'target' named 'custody', so keyword arguments to a"
                 " CustodyThread can't be named 'custody'")
-        kwargs['custody'] = custody
+        kwargs["custody"] = custody
         super().__init__(group, target, name, args, kwargs)
         self.custody = custody
 
@@ -455,16 +455,9 @@ FancyThread = ResultThread # So Andy can refer to it like this.
 PoliteThread = CustodyThread
 
 class ObjectInSubprocess:
-    def __init__(
-        self,
-        initializer,
-        *initargs,
-        custom_loop=None,
-        close_method_name=None,
-        closeargs=None,
-        closekwargs=None,
-        **initkwargs,
-        ):
+    def __init__(self, initializer, *initargs, custom_loop=None,
+                 close_method_name=None, closeargs=None, closekwargs=None,
+                 **initkwargs):
         """Make an object in a child process, that acts like it isn't.
 
         As much as possible, we try to make instances of ObjectInSubprocess
@@ -493,7 +486,7 @@ class ObjectInSubprocess:
         # Attribute-setting looks weird here because we override __setattr__,
         # and because we use a dummy object's namespace to hold our attributes
         # so we shadow as little of the object's namespace as possible:
-        super().__setattr__('_', _DummyClass()) # Weird, but for a reason.
+        super().__setattr__("_", _DummyClass()) # Weird, but for a reason.
         self._.parent_pipe = parent_pipe
         self._.parent_pipe_lock = _ObjectInSubprocessPipeLock()
         self._.child_pipe = child_pipe
@@ -502,9 +495,9 @@ class ObjectInSubprocess:
         # Make sure the child process initialized successfully:
         with self._.parent_pipe_lock:
             self._.child_process.start()
-            assert _get_response(self) == 'Successfully initialized'
+            assert _get_response(self) == "Successfully initialized"
         # Try to ensure the child process closes when we exit:
-        dummy_namespace = getattr(self, '_')
+        dummy_namespace = getattr(self, "_")
         weakref.finalize(self, _close, dummy_namespace)
         try:
             signal.signal(signal.SIGTERM, lambda s, f: _close(dummy_namespace))
@@ -520,7 +513,7 @@ class ObjectInSubprocess:
         process over a pipe.
         """
         with self._.parent_pipe_lock:
-            self._.parent_pipe.send(('__getattribute__', (name,), {}))
+            self._.parent_pipe.send(("__getattribute__", (name,), {}))
             attr = _get_response(self)
         if callable(attr):
             def attr(*args, **kwargs):
@@ -531,12 +524,13 @@ class ObjectInSubprocess:
 
     def __setattr__(self, name, value):
         with self._.parent_pipe_lock:
-            self._.parent_pipe.send(('__setattr__', (name, value), {}))
+            self._.parent_pipe.send(("__setattr__", (name, value), {}))
             return _get_response(self)
 
 def _get_response(object_in_subprocess):
     """Effectively a method of ObjectInSubprocess, but defined externally to
-    minimize shadowing of the object's namespace"""
+    minimize shadowing of the object's namespace
+    """
     resp, printed_output = object_in_subprocess._.parent_pipe.recv()
     if len(printed_output) > 0:
         print(printed_output, end='')
@@ -546,7 +540,8 @@ def _get_response(object_in_subprocess):
 
 def _close(dummy_namespace):
     """Effectively a method of ObjectInSubprocess, but defined externally to
-    minimize shadowing of the object's namespace"""
+    minimize shadowing of the object's namespace
+    """
     if not dummy_namespace.child_process.is_alive():
         return
     with dummy_namespace.parent_pipe_lock:
@@ -556,8 +551,7 @@ def _close(dummy_namespace):
 
 def _child_loop(child_pipe, initializer, initargs, initkwargs,
                 close_method_name, closeargs, closekwargs):
-    """The event loop of a ObjectInSubprocess's child process
-    """
+    """The event loop of a ObjectInSubprocess's child process"""
     # Initialization.
     printed_output = io.StringIO()
     try: # Create an instance of our object...
@@ -570,7 +564,7 @@ def _child_loop(child_pipe, initializer, initargs, initkwargs,
                 atexit.register(lambda: close_method(*closeargs, **closekwargs))
                 # Note: We don't know if print statements in the close method
                 # will print in the main process.
-        child_pipe.send(('Successfully initialized', printed_output.getvalue()))
+        child_pipe.send(("Successfully initialized", printed_output.getvalue()))
     except Exception as e: # If we fail to initialize, just give up.
         e.child_traceback_string = traceback.format_exc()
         child_pipe.send((e, printed_output.getvalue()))
@@ -625,8 +619,9 @@ class _WaitingList:
         self.waiting_list_lock.release()
 
 class _ObjectInSubprocessPipeLock:
-    '''Raises an educational exception (rather than blocking) when you try
-       to acquire a locked lock.'''
+    """Raises an educational exception (rather than blocking) when you try
+    to acquire a locked lock.
+    """
     def __init__(self):
         self.lock = threading.Lock()
 
@@ -699,7 +694,7 @@ class _Custody:
             self._wait_in_line()
 
     def release(self):
-        """ Release custody of the current shared resource.
+        """Release custody of the current shared resource.
 
         If you get custody of a shared resource and then raise an exception,
         the next-in-line might wait forever.
@@ -736,7 +731,7 @@ class _Custody:
 # sys.excepthook and threading.excepthook seems to be the standard way
 # to do this:
 def _try_to_print_child_traceback(v):
-    if hasattr(v, 'child_traceback_string'):
+    if hasattr(v, "child_traceback_string"):
         print(f'{" Child Process Traceback ":v^79s}\n',
               v.child_traceback_string,
               f'{" Child Process Traceback ":^^79s}\n',
@@ -758,8 +753,8 @@ sys.excepthook = _my_excepthook
 # will crash with a RuntimeError. If you really need 'fork', or
 # 'forkserver', then you probably know what you're doing better than us,
 # and you shouldn't be using this module.
-if mp.get_start_method(allow_none=True) != 'spawn':
-    mp.set_start_method('spawn')
+if mp.get_start_method(allow_none=True) != "spawn":
+    mp.set_start_method("spawn")
 
 # Testing block:
 class MyTestClass:
@@ -1455,7 +1450,7 @@ class TestObjectInSubprocess(MyTestClass):
         assert _a.offset != a.offset
         assert _a.strides != a.strides
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     TestResultThreadAndCustodyThread().run()
     TestSharedNDArray().run()
     TestObjectInSubprocess().run()
