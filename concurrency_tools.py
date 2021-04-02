@@ -37,14 +37,17 @@ very poorly commented; can you still figure out what it's doing?
 import numpy as np
 from concurrency_tools import ObjectInSubprocess, CustodyThread, SharedNDArray
 
-def main():
-    # Tune these values to get reliable operation on your machine:
-    fps =    500           # Camera frames per second
-    shape = (16, 512, 512) # Pixel dimensions of each data buffer
-    N =      10            # Number of data buffers to acquire
-    description = (
-        "Record -> Deconvolve -> Display -> Detect motion -> Save\n" +
-        "%d bursts of %d %dx%d frames at %d frames/second"%(N, *shape, fps))
+# Tune these values to get reliable operation on your machine:
+fps =    500           # Camera frames per second
+shape = (16, 512, 512) # Pixel dimensions of each data buffer
+N =      10            # Number of data buffers to acquire
+description = (
+    "Record -> Deconvolve -> Display -> Detect motion -> Save\n" +
+    "%d bursts of %d %dx%d frames at %d frames/second"%(N, *shape, fps))
+
+def without_concurrency():
+    # On my machine, this prints:
+    # Camera spends 322 ms working, but also spends 2644 ms waiting!
     ####################################################################
     print("Simulating acquiring without concurrency...\n" + description)
     ####################################################################
@@ -66,6 +69,10 @@ def main():
         timelapse(db)
     print("Camera spends %0.0f ms working, but also spends %0.0f ms waiting!"%(
         camera.time_working*1000, camera.time_waiting*1000))
+
+def with_concurrency():
+    # On my machine, this prints:
+    # Camera spends 323 ms working, but only spends 12 ms waiting.
     ####################################################################
     print("\nSimulating acquiring WITH concurrency...\n" + description)
     ####################################################################
@@ -164,7 +171,8 @@ class Storage:
             np.save(f, x)
 
 if __name__ == '__main__':
-    main()
+    without_concurrency()
+    with_concurrency()
                             ######################
                             #  END EXAMPLE CODE  #
                             ######################
