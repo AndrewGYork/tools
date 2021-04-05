@@ -527,7 +527,6 @@ class E753_Z_Piezo:
         # Leave the piezo in closed-loop, non-analog control
         self.set_analog_control_state(False)
         self.set_closed_loop()
-        self.move(50)
         if self.closed_loop: self._finish_moving()
         self.stop()
         self.port.close()
