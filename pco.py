@@ -70,6 +70,7 @@ class Camera:
         self._set_acquire_mode('auto')
         try:
             self._set_pixel_rate({'edge 4.2': 272250000,
+                                  'edge 4.2 bi': 46000000,
                                   'edge 5.5': 286000000,
                                   'pixelfly':  24000000, # Read from camera once
                                   'panda 4.2': 44000000, # Read from camera once
@@ -581,10 +582,13 @@ class Camera:
             self.camera_handle, 0, exposure_time_microseconds, 1, 1)
         self._get_exposure_time()
         if self.camera_type == 'panda 4.2':
-            assert abs(self.exposure_time_microseconds -
-                       exposure_time_microseconds) <= 13
+            tolerance = 13
+        elif self.camera_type == 'edge 4.2 bi':
+            tolerance = 6
         else:
-            assert self.exposure_time_microseconds == exposure_time_microseconds
+            tolerance = 0
+        assert abs(self.exposure_time_microseconds -
+                   exposure_time_microseconds) <= tolerance
         return self.exposure_time_microseconds
 
     def _get_roi(self):
@@ -620,7 +624,7 @@ class Camera:
         elif self.camera_type == 'edge 5.5':
             max_lines = 1080
             full_chip_rolling_time = 1e4
-        elif self.camera_type == 'panda 4.2':
+        elif self.camera_type in ('panda 4.2', 'edge 4.2 bi'):
             max_lines = 1024
             full_chip_rolling_time = 2.5e4 # TODO: verify rolling time for panda
         # TODO: calculate rolling time for pixelfly...better
@@ -628,7 +632,7 @@ class Camera:
             full_chip_rolling_time = 7.5e4
             return full_chip_rolling_time
         chip_fraction = max(y1 - max_lines, max_lines + 1 - y0) / max_lines
-        return  full_chip_rolling_time * chip_fraction
+        return full_chip_rolling_time * chip_fraction
 
     def _legalize_roi(self, roi):
         """This just calls the _legalize_roi function defined below.
@@ -648,6 +652,7 @@ class Camera:
         camera_name = C.c_char_p(b' '*40)
         dll.get_camera_name(self.camera_handle, camera_name, 40)
         name2type = {'pco.edge rolling shutter 4.2': 'edge 4.2',
+                     'pco.edge 4.2 bi': 'edge 4.2 bi',
                      'pco.edge 5.5': 'edge 5.5', # This is probably wrong
                      'pco.panda 4.2': 'panda 4.2',
                      'pco.USB.Pixel.Fly': 'pixelfly'}
@@ -682,6 +687,9 @@ def legalize_roi(
     if camera_type == 'edge 4.2':
         min_width, min_height = 40, 10
         max_lr, max_ud, step_lr, = 2060, 2048, 20
+    elif camera_type == 'edge 4.2 bi':
+        min_width, min_height = 32, 16
+        max_lr, max_ud, step_lr, = 2048, 2048, 32
     elif camera_type == 'edge 5.5':
         min_width, min_height = 160, 10
         max_lr, max_ud, step_lr = 2560, 2160, 160
@@ -1116,7 +1124,7 @@ dll.set_roi.argtypes = [
 dll.set_roi.restype = check_error
 
 dll.get_camera_name = dll.PCO_GetCameraName
-dll.get_camera_name.argtype = [
+dll.get_camera_name.argtypes = [
     C.c_void_p,
     C.c_char_p,
     C.c_uint16]
