@@ -434,7 +434,7 @@ api.clear_task = api.DAQmxClearTask
 api.clear_task.argtypes = [C.c_void_p]
 api.clear_task.restype = check_error
 
-if __name__ == '__main__':
+##if __name__ == '__main__':
     ## Test basic functionality of the Analog_Out object
     # daq = Analog_Out(
     #     rate=1e3,
