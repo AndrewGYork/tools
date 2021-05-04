@@ -263,6 +263,40 @@ class Analog_Out:
             self._task_running = False
         return None
 
+    def _enable_trigger(self, channel, polarity='rising'):
+        '''Configure system to wait for a digital trigger of the
+        indicated polarity on the indicated input channel, passed as a
+        string or a byte string (e.g. 'PFI0' or b'PFI0')
+        '''
+        if type(channel) == str:
+            channel = bytes(channel, encoding='ascii')
+        assert type(channel) == bytes
+        assert polarity in ('rising', 'falling')
+        polarity_code = {'rising': C.c_int32(10280), # DAQmx_Val_Rising  10280
+                         'falling': C.c_int32(10171) # DAQmx_Val_Falling 10171
+                         }[polarity]
+        api.enable_digital_trigger(
+            self.task_handle,
+            channel,
+            polarity_code)
+        if self.verbose:
+            print("Enabling ext. trigger on channel", channel,
+                  "of the NI", self.daq_type)
+        self.ext_trigger_channel = channel.decode('ascii')
+        self.ext_trigger_polarity = polarity
+        return None
+
+    def _disable_trigger(self):
+        '''Configure system to begin playing voltages immediately upon
+        starting a task.
+        '''
+        api.disable_trigger(self.task_handle)
+        self.ext_trigger_channel = None
+        self.ext_trigger_polarity = None
+        if self.verbose:
+            print("Disabling ext. trigger of the NI", self.daq_type)
+        return None
+
     def _write_voltages(self, voltages, force_final_zeros=True):
         assert len(voltages.shape) == 2
         assert voltages.dtype == self.voltages.dtype
@@ -339,6 +373,17 @@ api.create_do_channel.argtypes = [
     C.c_int32]
 api.create_do_channel.restype = check_error
 
+api.enable_digital_trigger = api.DAQmxCfgDigEdgeStartTrig
+api.enable_digital_trigger.argtypes = [
+    C.c_void_p,
+    C.c_char_p,
+    C.c_int32]
+api.enable_digital_trigger.restype = check_error
+
+api.disable_trigger = api.DAQmxDisableStartTrig
+api.disable_trigger.argtypes = [C.c_void_p]
+api.disable_trigger.restype = check_error
+
 api.clock_timing = api.DAQmxCfgSampClkTiming
 api.clock_timing.argtypes = [
     C.c_void_p,
@@ -411,29 +456,29 @@ if __name__ == '__main__':
     #     daq.close()
 
 ## This block tests an AO/DO play of 9401/9263 cards in a cDAQ-9174 chassis.
-
-    ## 6733 test block
-    # rate = 2e4
-    # do_type = '6733_digital'
-    # do_name = 'Dev1'
-    # do_nchannels = 8
-    # do_clock = '/Dev1/ao/SampleClock'
-    # do = Analog_Out(
-    #     num_channels=do_nchannels,
-    #     rate=rate,
-    #     daq_type=do_type,
-    #     board_name=do_name,
-    #     clock_name=do_clock,
-    #     verbose=False)
-    # ao_type = '6733'
-    # ao_name = 'Dev1'
-    # ao_nchannels = 8
-    # ao = Analog_Out(
-    #     num_channels=ao_nchannels,
-    #     rate=rate,
-    #     daq_type=ao_type,
-    #     board_name=ao_name,
-    #     verbose=False)
+##
+##    ## 6733 test block
+##    rate = 2e4
+##    do_type = '6733_digital'
+##    do_name = 'Dev1'
+##    do_nchannels = 8
+##    do_clock = '/Dev1/ao/SampleClock'
+##    do = Analog_Out(
+##        num_channels=do_nchannels,
+##        rate=rate,
+##        daq_type=do_type,
+##        board_name=do_name,
+##        clock_name=do_clock,
+##        verbose=True)
+##    ao_type = '6733'
+##    ao_name = 'Dev1'
+##    ao_nchannels = 8
+##    ao = Analog_Out(
+##        num_channels=ao_nchannels,
+##        rate=rate,
+##        daq_type=ao_type,
+##        board_name=ao_name,
+##        verbose=True)
 
 ##    ## 6738 test block
 ##    rate = 2e4
@@ -466,15 +511,15 @@ if __name__ == '__main__':
 ##    do.close()
 ##    ao.close()
 
-    ## PXI 6739 test block
-    ao_nchannels = 30
-    ao = Analog_Out(
-        num_channels=ao_nchannels,
-        rate=1e5,
-        daq_type='6739',
-        board_name='PXI1Slot2',
-        verbose=True)
-    volts = np.zeros((ao.s2p(1), ao_nchannels), 'float64')
-    volts[ao.s2p(.25):ao.s2p(.75), :] = 10
-    ao.play_voltages(volts, block=True)
-    ao.close()
+##    ## PXI 6739 test block
+##    ao_nchannels = 30
+##    ao = Analog_Out(
+##        num_channels=ao_nchannels,
+##        rate=1e5,
+##        daq_type='6739',
+##        board_name='PXI1Slot2',
+##        verbose=True)
+##    volts = np.zeros((ao.s2p(1), ao_nchannels), 'float64')
+##    volts[ao.s2p(.25):ao.s2p(.75), :] = 10
+##    ao.play_voltages(volts, block=True)
+##    ao.close()
