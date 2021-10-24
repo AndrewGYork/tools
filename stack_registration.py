@@ -374,7 +374,7 @@ def stack_rotational_registration(
                              axis=1, n=polar_slice.shape[1])
         spike_1d = spike.sum(axis=0)
         loc = np.argmax(spike_1d)
-        if refinement is 'spike_interpolation':
+        if refinement == 'spike_interpolation':
             ## Use (very simple) three-point polynomial interpolation to
             ## refine the location of the peak of the spike:
             neighbors = np.array([-1, 0, 1])
@@ -397,16 +397,16 @@ def stack_rotational_registration(
         small_cur_180 = rotate(small_current_slice,
                                angle=angle+180, reshape=False)
         if (small_cur_180*small_ref).sum() > (small_cur_000*small_ref).sum():
-            if fail_180_test is 'fix_but_print_warning':
+            if fail_180_test == 'fix_but_print_warning':
                 angle += 180
                 print(" **Warning: potentially ambiguous rotation detected**")
                 print("   Inspect the registration for rotations off by 180"+
                       " degrees, at slice %i"%(which_slice))
-            elif fail_180_test is 'fix_silently':
+            elif fail_180_test == 'fix_silently':
                 angle += 180
-            elif fail_180_test is 'ignore_silently':
+            elif fail_180_test == 'ignore_silently':
                 pass
-            elif fail_180_test is 'raise_exception':
+            elif fail_180_test == 'raise_exception':
                 raise UserWarning(
                     "Potentially ambiguous rotation detected.\n"+
                     "One of your slices needed more than 90 degrees rotation")
