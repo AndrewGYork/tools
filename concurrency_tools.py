@@ -507,6 +507,7 @@ class ObjectInSubprocess:
         # Try to ensure the child process closes when we exit:
         dummy_namespace = getattr(self, "_")
         weakref.finalize(self, _close, dummy_namespace)
+        atexit.register(_close, dummy_namespace)
         try:
             signal.signal(signal.SIGTERM, lambda s, f: _close(dummy_namespace))
         except ValueError: # We are probably starting from a thread.
@@ -1247,11 +1248,22 @@ class TestObjectInSubprocess(MyTestClass):
     def test_create_and_close_object_in_subprocess(self):
         import gc
         p = ObjectInSubprocess(TestObjectInSubprocess.TestClass)
-        dummy_namespace = p._
+        child_process = p._.child_process
         del p
         gc.collect()
-        dummy_namespace.child_process.join(timeout=1)
-        assert not dummy_namespace.child_process.is_alive()
+        child_process.join(timeout=1)
+        assert not child_process.is_alive()
+
+        # Other objects to finalize can cause some strange behavior 
+        weakref.finalize({1,}, _dummy_function)
+        p = ObjectInSubprocess(TestObjectInSubprocess.TestClass)
+        child_process = p._.child_process
+        # Trigger ref count increase (ref in handled exception tb)
+        hasattr(p, 'attribute_that_does_not_exist')
+        del p
+        gc.collect()
+        child_process.join(timeout=1)
+        assert not child_process.is_alive()
 
     def test_passing_normal_numpy_array(self):
         a = np.zeros((3, 3), dtype=int)
@@ -1462,3 +1474,6 @@ if __name__ == "__main__":
     TestResultThreadAndCustodyThread().run()
     TestSharedNDArray().run()
     TestObjectInSubprocess().run()
+    # Test the childprocess is stopped when the script completed
+    # with a reference to the object:
+    p = ObjectInSubprocess(TestObjectInSubprocess.TestClass)
