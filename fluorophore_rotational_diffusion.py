@@ -78,7 +78,7 @@ def gaussian_propagator(step_sizes):
         np.random.uniform(0, 1, len(step_sizes))))
     return result
 
-def _test_propagators(n=int(1e3)):
+def _test_propagators(n=int(1e7)):
 ##    step_sizes = 0.1 * np.ones(n, dtype='float64')
 ##    print()
 ##    t = {}
@@ -93,29 +93,36 @@ def _test_propagators(n=int(1e3)):
 ##        print('%0.1f'%(1e9*np.mean(t[method]) / n),
 ##              "nanoseconds per %s_propagator()"%(method))
 
-    x, y, z = np.zeros(n), np.zeros(n), np.ones(n)
-    total_step = 0
-    small_step = 0.0001
-    for i in range(100000):
-        total_step += small_step
-        theta_d = gaussian_propagator(np.full(n, small_step))
-        phi_d   = np.random.uniform(0, 2*np.pi, size=n)
-        assert np.all(theta_d < np.pi)
-        x, y, z = polar_displacement(x, y, z, theta_d, phi_d)
-    print("Total step:", total_step)
-    print(z.mean(), z.std())
+    def from_the_pole(n, propagator, time_step, n_steps):
+        dt = time_step / n_steps
+        step_size = np.sqrt(2*dt)
+        step_sizes = np.full(n, step_size)
+        x, y, z = np.zeros(n), np.zeros(n), np.ones(n)
+        for i in range(n_steps):
+            theta_d = propagator(step_sizes)
+            phi_d   = np.random.uniform(0, 2*np.pi, size=n)
+            assert np.all(theta_d < np.pi)
+            x, y, z = polar_displacement(x, y, z, theta_d, phi_d)
+        return x, y, z
 
-    x, y, z = np.zeros(n), np.zeros(n), np.ones(n)
-    total_step = 0
-    small_step = 0.001
-    for i in range(10000):
-        total_step += small_step
-        theta_d = ghosh_propagator(np.full(n, small_step))
-        phi_d   = np.random.uniform(0, 2*np.pi, size=n)
-        assert np.all(theta_d < np.pi)
-        x, y, z = polar_displacement(x, y, z, theta_d, phi_d)
-    print("Total step:", total_step)
-    print(z.mean(), z.std())
+    gaussian, ghosh = [], []
+    for n_steps in (160, 80, 40, 20, 10, 5):
+        gaussian.append(from_the_pole(n, gaussian_propagator, 1, n_steps)[2])
+        ghosh.append(   from_the_pole(n,    ghosh_propagator, 1, n_steps)[2])
+    import matplotlib.pyplot as plt
+    for i, z in enumerate(gaussian):
+        hist, bin_edges = np.histogram(np.arccos(z), bins=30, range=(0, np.pi))
+        if i == 0:
+            ref = hist
+        plt.plot((bin_edges[1:] + bin_edges[:-1])/2, hist-ref, '-',  c='C%i'%i,
+                 label='Gauss %i'%i)
+    for i, z in enumerate(ghosh):
+        hist, bin_edges = np.histogram(np.arccos(z), bins=30, range=(0, np.pi))
+        plt.plot((bin_edges[1:] + bin_edges[:-1])/2, hist-ref, '.-', c='C%i'%i,
+                 label='Ghosh %i'%i)
+    plt.legend()
+    plt.show()
+
 
     # Run many small Gaussians to generate a 'ground truth'
     # Run one big Ghosh
