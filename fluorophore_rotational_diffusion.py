@@ -4,120 +4,129 @@ import time
 import numpy as np
 
 def main():
-    n = int(1e7)
-    theta = np.random.uniform(0,   np.pi, size=n).astype('float64')
-    phi   = np.random.uniform(0, 2*np.pi, size=n).astype('float64')
-    temp  = np.random.uniform(0, 8*np.pi, size=n).astype('float64')
+##    _test_sin_cos()
+##    _test_to_xyz()
+##    _test_polar_displacement()
+    _test_propagators()
 
-##    phi_i   =           np.random.uniform( 0, 2*np.pi, n).astype('float32')
-##    theta_i = np.arccos(np.random.uniform(-1      , 1, n)).astype('float32')
-##    theta_i[0] = np.pi - 1e-3
-##    x, y, z = to_xyz(theta_i, phi_i)
-##
-##    t1, t2 = [], []
-##    for i in range(10):
-##        start = time.perf_counter()
-##        xf, yf, zf = polar_displacement(x, y, z, theta, phi, method='naive')
-##        end = time.perf_counter()
-##        t1.append(end - start)
-##        dot = x*xf + y*yf + z*zf
-##        cos = np.cos(theta)
-##        print(xf[0], yf[0], zf[0])
-##        print((cos-dot).min(), (cos-dot).max())
-##
-##        start = time.perf_counter()
-##        xf, yf, zf = polar_displacement(x, y, z, theta, phi, method='accurate')
-##        end = time.perf_counter()
-##        t2.append(end - start)
-##        dot = x*xf + y*yf + z*zf
-##        cos = np.cos(theta)
-##        print(xf[0], yf[0], zf[0])
-##        print((cos-dot).min(), (cos-dot).max())
-##        print()
-##    print('%0.2f'%(1e9*np.mean(t1) / n), "ns per displacement")
-##    print('%0.2f'%(1e9*np.mean(t2) / n), "ns per displacement")
+def ghosh_propagator(step_sizes):
+    """Draw random angular displacements from the "new" propagator for
+    diffusion on a sphere, as described by Ghosh et al. in arXiv:1303.1278.
 
+    The new propagator, hopefully accurate for larger time steps:
+        q_new = ((2 / sigma**2) * np.exp(-(beta/sigma)**2) *
+                 np.sqrt(beta * np.sin(beta)) *
+                 norm)
 
+                 ...where 'norm' is chosen to normalize the distribution.
 
-##    t1, t2 = [], []
-##    for i in range(10):
-##        start = time.perf_counter()
-##        small = theta < 0.01
-##        theta[small] = 1
-##        end = time.perf_counter()
-##        t1.append(end - start)
-##
-##        start = time.perf_counter()
-##        theta = np.sqrt(theta)
-##        end = time.perf_counter()
-##        t2.append(end - start)
-##
+    'step_sizes' is a 1d numpy array of nonnegative floating point
+    numbers ('sigma' in the equation above).
+
+    Return value is a 1d numpy array the same shape as 'step_sizes',
+    with each entry drawn from a distribution determined by the
+    corresponding entry of 'step_sizes'.
+    """
+    # Iteratively populate the result vector:
+    first_iteration = True
+    while True:
+        # Which step sizes do we still need to draw random numbers for?
+        steps = step_sizes if first_iteration else step_sizes[tbd]
+        # Draw from a truncated non-normalized version of the Gaussian
+        # propagator as an upper bound for rejection sampling. Don't
+        # bother drawing values that will exceed pi.
+        will_draw_pi = np.exp(-(np.pi / steps)**2)
+        candidates = steps * np.sqrt(-np.log(
+            np.random.uniform(will_draw_pi, 1, len(steps))))
+        # To convert draws from our upper bound distribution to our desired
+        # distribution, reject samples stochastically by the ratio of the
+        # desired distribution to the upper bound distribution,
+        # which is sqrt(sin(x)/x).
+        rejected = (np.random.uniform(0, 1, candidates.shape) >
+                    np.sqrt(np.sin(candidates) / candidates))
+        # Update results
+        if first_iteration:
+            result = candidates
+            tbd = np.nonzero(rejected)[0] # Coordinates of unset results
+            first_iteration = False
+        else:
+            result[tbd] = candidates
+            tbd = tbd[rejected]
+        if len(tbd) == 0: break # We've set every element of the result
+    return result
+
+def gaussian_propagator(step_sizes):
+    """Draw random angular displacements from the Gaussian propagator for
+    diffusion on a sphere, as described by Ghosh et al. in arXiv:1303.1278.
+
+    The Gaussian propagator, accurate for small time steps:
+        q_gauss = ((2 / sigma**2) * np.exp(-(beta/sigma)**2) *
+                   beta)
+
+    'step_sizes' is a 1d numpy array of nonnegative floating point
+    numbers ('sigma' in the equation above).
+
+    Return value is a 1d numpy array the same shape as 'step_sizes',
+    with each entry drawn from a distribution determined by the
+    corresponding entry of 'step_sizes'.
+
+    This is mostly useful for verifying that the Ghosh propagator works,
+    yielding equivalent results with fewer, larger steps.
+    """
+    # Calculate draws via inverse transform sampling.
+    result = step_sizes * np.sqrt(-np.log(
+        np.random.uniform(0, 1, len(step_sizes))))
+    return result
+
+def _test_propagators(n=int(1e3)):
+##    step_sizes = 0.1 * np.ones(n, dtype='float64')
 ##    print()
-##    print('%0.2f'%(1e9*np.mean(t1) / n), "ns per")
-##    print('%0.2f'%(1e9*np.mean(t2) / n), "ns per")
+##    t = {}
+##    for propagator, method in ((gaussian_propagator, 'gaussian'),
+##                               (ghosh_propagator,    'ghosh'   )):
+##        t[method] = []
+##        for i in range(10):
+##            start = time.perf_counter()
+##            propagator(step_sizes)
+##            end = time.perf_counter()
+##            t[method].append(end - start)
+##        print('%0.1f'%(1e9*np.mean(t[method]) / n),
+##              "nanoseconds per %s_propagator()"%(method))
 
+    x, y, z = np.zeros(n), np.zeros(n), np.ones(n)
+    total_step = 0
+    small_step = 0.0001
+    for i in range(100000):
+        total_step += small_step
+        theta_d = gaussian_propagator(np.full(n, small_step))
+        phi_d   = np.random.uniform(0, 2*np.pi, size=n)
+        assert np.all(theta_d < np.pi)
+        x, y, z = polar_displacement(x, y, z, theta_d, phi_d)
+    print("Total step:", total_step)
+    print(z.mean(), z.std())
 
-##    # Check to_xyz() performance
-##    t1, t2 = [], []
-##    for i in range(10):
-##        start = time.perf_counter()
-##        x1, y1, z1 = to_xyz(theta, phi, method='direct')
-##        end = time.perf_counter()
-##        t1.append(end - start)
-##
-##        start = time.perf_counter()
-##        x2, y2, z2 = to_xyz(theta, phi)
-##        end = time.perf_counter()
-##        t2.append(end - start)
-##        assert np.allclose(x1, x2)
-##        assert np.allclose(y1, y2)
-##        assert np.allclose(z1, z2)
-##    print()
-##    print('%0.2f'%(1e9*np.mean(t1) / n), "ns per direct to_xyz()")
-##    print('%0.2f'%(1e9*np.mean(t2) / n), "ns per ugly   to_xyz()")
+    x, y, z = np.zeros(n), np.zeros(n), np.ones(n)
+    total_step = 0
+    small_step = 0.001
+    for i in range(10000):
+        total_step += small_step
+        theta_d = ghosh_propagator(np.full(n, small_step))
+        phi_d   = np.random.uniform(0, 2*np.pi, size=n)
+        assert np.all(theta_d < np.pi)
+        x, y, z = polar_displacement(x, y, z, theta_d, phi_d)
+    print("Total step:", total_step)
+    print(z.mean(), z.std())
 
-##    # Check sin_cos() performance    
-##    assert np.allclose(sin_cos(temp,  method='direct'),
-##                       sin_cos(temp,  method='sqrt'))
-##    
-##    assert np.allclose(sin_cos(phi,   method='direct'),
-##                       sin_cos(phi,   method='0,2pi'))
-##
-##    assert np.allclose(sin_cos(theta, method='direct'),
-##                       sin_cos(theta, method='0,pi'))
-##    t1, t2, t3, t4 = [], [], [], []
-##    for i in range(10):
-##        start = time.perf_counter()
-##        sin_cos(theta, method='direct')
-##        end = time.perf_counter()
-##        t1.append(end - start)
-##
-##        start = time.perf_counter()
-##        sin_cos(theta, method='sqrt')
-##        end = time.perf_counter()
-##        t2.append(end - start)
-##
-##        start = time.perf_counter()
-##        sin_cos(theta, method='0,2pi')
-##        end = time.perf_counter()
-##        t3.append(end - start)
-##
-##        start = time.perf_counter()
-##        sin_cos(theta, method='0,pi')
-##        end = time.perf_counter()
-##        t4.append(end - start)
-##
-##    print()
-##    print('%0.1f'%(1e9*np.mean(t1) / n), 'nanoseconds per direct sin_cos()')
-##    print('%0.1f'%(1e9*np.mean(t2) / n), 'nanoseconds per sqrt   sin_cos()')
-##    print('%0.1f'%(1e9*np.mean(t3) / n), 'nanoseconds per 0,2pi  sin_cos()')
-##    print('%0.1f'%(1e9*np.mean(t4) / n), 'nanoseconds per 0,pi   sin_cos()')
+    # Run many small Gaussians to generate a 'ground truth'
+    # Run one big Ghosh
+    # Run one big Gaussian
 
-
-def polar_displacement(x, y, z, theta_d, phi_d, method='accurate'):
+def polar_displacement(x, y, z, theta_d, phi_d, method='accurate', norm=True):
     """Take a Cartesian positions x, y, z and update them by
     spherical displacements (theta_d, phi_d). Theta is how much you
     moved and phi is which way.
+
+    Note that this returns gibberish for theta_d > pi
     """
     assert method in ('naive', 'accurate')
     x_d, y_d, z_d = to_xyz(theta_d, phi_d)
@@ -126,14 +135,19 @@ def polar_displacement(x, y, z, theta_d, phi_d, method='accurate'):
     # do this via a rotation matrix calculated as described in:
     #  doi.org/10.1080/10867651.1999.10487509
     #  "Efficiently Building a Matrix to Rotate One Vector to Another",
+    with np.errstate(divide='ignore'): # In case z = -1
+        ovr_1pz = 1 / (1+z)
     if method == 'naive': # The obvious way
-        x_f = x_d*(z + y*y/(1+z)) + y_d*(   -x*y/(1+z)) + z_d*(x)
-        y_f = x_d*(   -x*y/(1+z)) + y_d*(z + x*x/(1+z)) + z_d*(y)
-        z_f = x_d*(     -x      ) + y_d*(     -y      ) + z_d*(z)
+        with np.errstate(invalid='ignore'):
+            x_f = x_d*(z + y*y*ovr_1pz) + y_d*(   -x*y*ovr_1pz) + z_d*(x)
+            y_f = x_d*(   -x*y*ovr_1pz) + y_d*(z + x*x*ovr_1pz) + z_d*(y)
+            z_f = x_d*(     -x        ) + y_d*(     -y        ) + z_d*(z)
+        isnan = (z == -1) # We divided by zero above, we have to fix it now
+        x_f[isnan] = -x_d[isnan]
+        y_f[isnan] =  y_d[isnan]
+        z_f[isnan] = -z_d[isnan]
     elif method == 'accurate': # More complicated, but numerically stable?
         # Precompute a few intermediates:
-        with np.errstate(divide='ignore'): # In case z = -1
-            ovr_1pz = 1 / (1+z)
         with np.errstate(invalid='ignore'):
             y_ovr_1pz =    y*ovr_1pz #  y / (1+z)
             xy_ovr_1pz = x*y_ovr_1pz # xy / (1+z)
@@ -144,7 +158,7 @@ def polar_displacement(x, y, z, theta_d, phi_d, method='accurate'):
         # x^2/(1+z) = (1-z) * cos(phi)^2
         # y^2/(1+z) = (1-z) * sin(phi)^2
         # x*y/(1+z) = (1-z) * sin(phi)*cos(phi)
-        unstable = z < (-1 + 1e-3) # Not sure where instability kicks in...
+        unstable = z < (-1 + 5e-2) # Not sure where instability kicks in...
         x_u, y_u, z_u = x[unstable], y[unstable], z[unstable]
         phi_u = np.arctan2(y_u, x_u)
         sin_ph_u, cos_ph_u = sin_cos(phi_u)
@@ -155,7 +169,42 @@ def polar_displacement(x, y, z, theta_d, phi_d, method='accurate'):
         x_f = x_d*(z + yy_ovr_1pz) + y_d*(   -xy_ovr_1pz) + z_d*(x)
         y_f = x_d*(   -xy_ovr_1pz) + y_d*(z + xx_ovr_1pz) + z_d*(y)
         z_f = x_d*(    -x        ) + y_d*(    -y        ) + z_d*(z)
+    if norm:
+        r = np.sqrt(x_f*x_f + y_f*y_f + z_f*z_f)
+        x_f /= r
+        y_f /= r
+        z_f /= r
     return x_f, y_f, z_f
+
+def _test_polar_displacement(n=int(1e6), dtype='float64', norm=True):
+    theta_d =    np.abs(np.random.normal(  0,   np.pi, size=n)).astype(dtype)
+    phi_d   =           np.random.uniform( 0, 2*np.pi, size=n ).astype(dtype)
+
+    theta_i = np.arccos(np.random.uniform(-1,       1, size=n)).astype(dtype)
+    phi_i   =           np.random.uniform( 0, 2*np.pi, size=n ).astype(dtype)
+    theta_i[0] = np.pi
+    theta_i[1] = np.pi - 1e-3
+    x, y, z = to_xyz(theta_i, phi_i)
+    print()    
+    t = {}
+    for method in ('naive', 'accurate'):
+        t[method] = []
+        for i in range(10):
+            start = time.perf_counter()
+            polar_displacement(x, y, z, theta_d, phi_d, method, norm)
+            end = time.perf_counter()
+            t[method].append(end - start)
+        print('%0.1f'%(1e9*np.mean(t[method]) / n),
+              "nanoseconds per polar_displacement(method='%s')"%(method))
+    for method in ('naive', 'accurate'):
+        xf, yf, zf = polar_displacement(x, y, z, theta_d, phi_d, method, norm)
+        angular_error = np.abs(np.cos(theta_d) - (x *xf + y *yf + z *zf))
+        print("%0.3e maximum angular error"%(angular_error.max()),
+              "for polar_displacement(method='%s')"%(method))
+        radial_error = np.abs(1                - (xf*xf + yf*yf + zf*zf))
+        print("%0.3e maximum  radial error"%(radial_error.max()),
+              "for polar_displacement(method='%s')"%(method))        
+    return None
 
 def to_xyz(theta, phi, method='ugly'):
     """Convert spherical polar angles to unit-length Cartesian coordinates
@@ -173,6 +222,25 @@ def to_xyz(theta, phi, method='ugly'):
         z = cos_th
     return x, y, z
 
+def _test_to_xyz(n=int(1e6), dtype='float64'):
+    theta = np.random.uniform(0,   np.pi, size=n).astype(dtype)
+    phi   = np.random.uniform(0, 2*np.pi, size=n).astype(dtype)
+
+    assert np.allclose(to_xyz(theta, phi, method='direct'),
+                       to_xyz(theta, phi, method='ugly'))
+    print()
+    t = {}
+    for method in ('direct', 'ugly'):
+        t[method] = []
+        for i in range(10):
+            start = time.perf_counter()
+            to_xyz(theta, phi, method)
+            end = time.perf_counter()
+            t[method].append(end - start)
+        print('%0.1f'%(1e9*np.mean(t[method]) / n),
+              'nanoseconds per %6s to_xyz()'%(method))
+    return None
+
 def sin_cos(radians, method='sqrt'):
     """We often want both the sine and cosine of an array of angles. We
     can do this slightly faster with a sqrt, especially in the common
@@ -182,128 +250,55 @@ def sin_cos(radians, method='sqrt'):
     checking for validity, i.e. 0 < radians < pi, 2pi. Make sure you
     don't use out-of-range arguments.
     """
+    radians = np.atleast_1d(radians)
     assert method in ('direct', 'sqrt', '0,2pi', '0,pi')
     cos = np.cos(radians)
     
     if method == 'direct': # Simple and obvious
         sin = np.sin(radians)
     else: # |sin| = np.sqrt(1 - cos*cos)
-        s = cos*cos
-        np.subtract(1, s, out=s)
-        np.sqrt(s, out=s)
-        sin = s
+        sin = np.sqrt(1 - cos*cos)
         
     if method == 'sqrt': # Handle arbitrary values of 'radians'
-        r = radians % (2*np.pi)
-        np.subtract(np.pi, r, out=r)
-        np.copysign(sin, r, out=sin)
+        sin[np.pi - (radians % (2*np.pi)) < 0] *= -1
     elif method == '0,2pi': # Assume 0 < radians < 2pi, no mod
-        sin[np.pi - radians < 0] *= -1
-##        np.copysign(sin, np.pi - radians, out=sin) 
-    elif method == '0,pi': # Assume 0 < radians < pi, no copysign
+        sin[np.pi - (radians            ) < 0] *= -1
+    elif method == '0,pi': # Assume 0 < radians < pi, no negation
         pass
     return sin, cos
+
+def _test_sin_cos(n=int(1e6), dtype='float64'):
+    """This test doesn't pass for float32, but neither does sin^2 + cos^2 == 1
+    """
+    theta = np.random.uniform(0,   np.pi, size=n).astype(dtype)
+    phi   = np.random.uniform(0, 2*np.pi, size=n).astype(dtype)
+    x     = np.random.uniform(0, 8*np.pi, size=n).astype(dtype)
+
+    assert np.allclose(sin_cos(x,     method='direct'),
+                       sin_cos(x,     method='sqrt'))
+    
+    assert np.allclose(sin_cos(phi,   method='direct'),
+                       sin_cos(phi,   method='0,2pi'))
+
+    assert np.allclose(sin_cos(theta, method='direct'),
+                       sin_cos(theta, method='0,pi'))
+    print()
+    t = {}
+    for method in ('direct', 'sqrt', '0,2pi', '0,pi'):
+        t[method] = []
+        for i in range(10):
+            start = time.perf_counter()
+            sin_cos(theta, method)
+            end = time.perf_counter()
+            t[method].append(end - start)
+        print('%0.1f'%(1e9*np.mean(t[method]) / n),
+              'nanoseconds per %6s sin_cos()'%(method))
+    return None
 
 
 # An object that only knows how to rotate
 
 
-##def polar_displacement(xyz, theta_d, phi_d):
-##    """Take a Cartesian positions xyz and update them by
-##    spherical displacements (theta_d, phi_d). Theta is how much you
-##    moved and phi is which way.
-##    """
-##    sin_th_d, cos_th_d = np.sin(theta_d), np.cos(theta_d); del theta_d
-##    sin_ph_d, cos_ph_d = np.sin(phi_d), np.cos(phi_d);     del phi_d
-##    # Convert to Cartesian:
-##    x_d = sin_th_d * cos_ph_d; del cos_ph_d
-##    y_d = sin_th_d * sin_ph_d; del sin_ph_d, sin_th_d
-##    z_d = cos_th_d;            del cos_th_d
-##    # Since the particles aren't (generally) at the north pole, we
-##    # have to rotate back to each particle's actual position. We'll
-##    # do this via a rotation about the y-axis by theta, followed by
-##    # a rotation about the z-axis by phi:
-##    theta = np.arccos(z)
-##    sin_th = np.sin(theta);                        del theta
-##    z_f = x_d *  -sin_th                + z_d * z; del sin_th
-##    phi = np.arctan2(y, x)
-##    cos_ph, sin_ph = np.cos(phi), np.sin(phi);     del phi
-##    y_f = x_d * z*sin_ph + y_d * cos_ph + z_d * y; del y
-##    x_f = x_d * z*cos_ph + y_d *-sin_ph + z_d * x
-##    return x_f, y_f, z_f
-
-
-##def gaussian_propagator(step_sizes):
-##    """Draw random angular displacements from the Gaussian propagator for
-##    diffusion on a sphere, as described by Ghosh et al. in arXiv:1303.1278.
-##
-##    The Gaussian propagator, accurate for small time steps:
-##        q_gauss = ((2 / sigma**2) * np.exp(-(beta/sigma)**2) *
-##                   beta)
-##
-##    'step_sizes' is a 1d numpy array of nonnegative floating point
-##    numbers ('sigma' in the equation above).
-##
-##    Return value is a 1d numpy array the same shape as 'step_sizes',
-##    with each entry drawn from a distribution determined by the
-##    corresponding entry of 'step_sizes'.
-##
-##    This is mostly useful for verifying that the Ghosh propagator works,
-##    yielding equivalent results with fewer, larger steps.
-##    """
-##    # Calculate draws via inverse transform sampling.
-##    result = step_sizes * np.sqrt(-np.log(
-##        np.random.uniform(0, 1, len(step_sizes))))
-##    return result
-##
-##
-##def ghosh_propagator(step_sizes):
-##    """Draw random angular displacements from the "new" propagator for
-##    diffusion on a sphere, as described by Ghosh et al. in arXiv:1303.1278.
-##
-##    The new propagator, hopefully accurate for larger time steps:
-##        q_new = ((2 / sigma**2) * np.exp(-(beta/sigma)**2) *
-##                 np.sqrt(beta * np.sin(beta)) *
-##                 norm)
-##
-##                 ...where 'norm' is chosen to normalize the distribution.
-##
-##    'step_sizes' is a 1d numpy array of nonnegative floating point
-##    numbers ('sigma' in the equation above).
-##
-##    Return value is a 1d numpy array the same shape as 'step_sizes',
-##    with each entry drawn from a distribution determined by the
-##    corresponding entry of 'step_sizes'.
-##    """
-##    # Iteratively populate the result vector:
-##    first_iteration = True
-##    while True:
-##        # Which step sizes do we still need to draw random numbers for?
-##        steps = step_sizes if first_iteration else step_sizes[tbd]
-##        # Draw from a truncated non-normalized version of the Gaussian
-##        # propagator as an upper bound for rejection sampling. Don't
-##        # bother drawing values that will exceed pi.
-##        will_draw_pi = np.exp(-(np.pi / steps)**2)
-##        candidates = steps * np.sqrt(-np.log(
-##            np.random.uniform(will_draw_pi, 1, len(steps))))
-##        # To convert draws from our upper bound distribution to our desired
-##        # distribution, reject samples stochastically by the ratio of the
-##        # desired distribution to the upper bound distribution,
-##        # which is sqrt(sin(x)/x).
-##        rejected = (np.random.uniform(0, 1, candidates.shape) >
-##                    np.sqrt(np.sin(candidates) / candidates))
-##        # Update results
-##        if first_iteration:
-##            result = candidates
-##            tbd = np.nonzero(rejected)[0] # Coordinates of unset results
-##            first_iteration = False
-##        else:
-##            result[tbd] = candidates
-##            tbd = tbd[rejected]
-##        if len(tbd) == 0: break # We've set every element of the result
-##    return result
-##
-##
 ### An object that only knows photophysics
 
 
