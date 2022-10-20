@@ -4,10 +4,152 @@ import time
 import numpy as np
 
 def main():
-##    _test_sin_cos()
-##    _test_to_xyz()
-##    _test_polar_displacement()
+    _test_sin_cos()
+    _test_to_xyz()
+    _test_polar_displacement()
     _test_propagators()
+    _test_diffusive_step_speed()
+    _test_safe_diffusive_step()
+    try:
+        _test_diffusive_step_accuracy()
+    except KeyboardInterrupt:
+        pass
+
+
+def safe_diffusive_step(
+    x, y, z,
+    normalized_time_step,
+    max_safe_step=0.5, # Don't count on this, could be wrong
+    ):
+    num_steps, remainder = np.divmod(normalized_time_step, max_safe_step)
+    num_steps = num_steps.astype('uint64') # Always an integer
+    num_steps_min, num_steps_max = num_steps.min(), num_steps.max()
+    if num_steps_min == num_steps_max: # Scalar time step
+        for _ in range(num_steps_max):
+            x, y, z = diffusive_step(x, y, z, max_safe_step)
+    else: # Vector time step
+        assert len(normalized_time_step) == len(x)
+        t_is_sorted = np.all(np.diff(normalized_time_step) > 0)
+        if not t_is_sorted: # Sorted xyz makes selecting unfinished stuff fast
+            idx = np.argsort(num_steps)
+            x, y, z = x[idx], y[idx], z[idx]
+            num_steps = num_steps[idx]
+        which_step = 1
+        while True:
+            first_unfinished = np.searchsorted(num_steps, which_step)
+            if first_unfinished == len(num_steps): # We're done taking steps
+                break
+            s = slice(first_unfinished, None)
+            x[s], y[s], z[s] = diffusive_step(x[s], y[s], z[s], max_safe_step)
+            which_step += 1
+        if not t_is_sorted: # Undo our sorting
+            idx_rev = np.empty_like(idx)
+            idx_rev[idx] = np.arange(len(idx), dtype=idx.dtype)
+            x, y, z = x[idx_rev], y[idx_rev], z[idx_rev]
+    # Finally, take our 'remainder' step:
+    if remainder.max() > 0:
+        x, y, z = diffusive_step(x, y, z, remainder)
+    return x, y, z
+
+def _test_safe_diffusive_step(n=int(1e5)):
+    x, y, z = np.zeros(n), np.zeros(n), np.ones(n)
+    print()
+    for tstep in (np.array(5),
+                  np.random.exponential(size=n, scale=5),
+                  ):
+        t = []
+        for i in range(10):
+            start = time.perf_counter()
+            safe_diffusive_step(x, y, z, normalized_time_step=tstep)
+            end = time.perf_counter()
+            t.append(end - start)
+        print('%0.1f nanoseconds per'%(1e9*np.mean(t) / n),
+              "safe_diffusive_step(normalized_time_step=%.1f +/- %.1f)"%(
+                  tstep.mean(), tstep.std()))
+
+def diffusive_step(x, y, z, normalized_time_step, propagator='ghosh'):
+    assert len(x) == len(y) == len(z)
+    angle_step = np.sqrt(2*normalized_time_step)
+    assert angle_step.shape in ((), (1,), x.shape)
+    angle_step = np.broadcast_to(angle_step, x.shape)
+    assert propagator in ('ghosh', 'gaussian')
+    prop = ghosh_propagator if propagator == 'ghosh' else gaussian_propagator
+    theta_d = prop(angle_step)
+    phi_d = np.random.uniform(0, 2*np.pi, len(angle_step))
+    return polar_displacement(x, y, z, theta_d, phi_d)
+
+def _test_diffusive_step_speed(n=int(1e5)):
+    x, y, z = np.zeros(n), np.zeros(n), np.ones(n)
+    t = {}
+    print()
+    for prop in ('gaussian', 'ghosh'):
+        t[prop] = []
+        for i in range(10):
+            start = time.perf_counter()
+            diffusive_step(x, y, z, normalized_time_step=0.1, propagator=prop)
+            end = time.perf_counter()
+            t[prop].append(end - start)
+        print('%0.1f'%(1e9*np.mean(t[prop]) / n),
+              "nanoseconds per diffusive_step('%s')"%(prop))
+
+def _test_diffusive_step_accuracy(n=int(1e5)):
+    x, y, z = np.zeros(n), np.zeros(n), np.ones(n)
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("Matplotlib import failed; no graphical test of diffusive_step()")
+        return None
+
+    def from_the_pole(propagator, n_steps):
+        xp, yp, zp = x, y, z
+        normalized_time_interval = 0.5
+        dt = normalized_time_interval / n_steps
+        for _ in range(n_steps):
+            xp, yp, zp = diffusive_step(xp, yp, zp, dt, propagator)
+        hist, bin_edges = np.histogram(np.arccos(zp), bins=30, range=(0, np.pi))
+        zc = (bin_edges[:-1] + bin_edges[1:]) / 2
+        return zc, hist
+
+    results = {'gaussian': {}, 'ghosh': {}}
+    propagators = results.keys()
+    step_numbers = (1, 2, 3, 10, 40, 200)
+    num_molecules = 0
+
+    # Save a figure on disk to show the relative accuracy of the propagators
+    # This takes a while to converge to good accuracy, so keep saving
+    # intermediate figures as we make progress through the calculation.
+    print("\nTesting diffusive_step() accuracy vs. step size.")
+    print("Use a KeyboardInterrupt (Ctrl-C) to abort")
+    print("Saving results in test_diffusive_step.png...", end='')
+    for rep in range(20000): # A long, long time
+        for prop in propagators:
+            for num_steps in step_numbers:
+                if num_steps not in results[prop]:
+                    results[prop][num_steps] = np.zeros(30)
+                zc, hist = from_the_pole(prop, num_steps)
+                results[prop][num_steps] += hist
+        num_molecules += n
+        ref = results['ghosh'][max(step_numbers)]
+
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 6))
+        for prop in propagators:
+            for i, num_steps in enumerate(step_numbers):
+                fmt = '-C%i'%i if prop == 'gaussian' else '--C%i'%i
+                label='%s %i steps'%(prop, num_steps)
+                ax1.plot(zc, results[prop][num_steps],       fmt, label=label)
+                ax2.plot(zc, results[prop][num_steps] - ref, fmt, label=label)
+        fig.suptitle("Number of molecules: %0.2e"%num_molecules)
+        ax1.set_title("Propagator result")
+        ax2.set_title("Result minus ref. (Ghosh %i steps)"%(max(step_numbers)))
+        for ax in (ax1, ax2):
+            ax.set_xlabel("Angle (radians)")
+            ax.legend()
+            ax.grid('on')
+        plt.savefig('test_diffusive_step.png')
+        plt.close(fig)
+        print('.', end='', sep='')
+    print("done.")
+    return None
 
 def ghosh_propagator(step_sizes):
     """Draw random angular displacements from the "new" propagator for
@@ -27,6 +169,10 @@ def ghosh_propagator(step_sizes):
     with each entry drawn from a distribution determined by the
     corresponding entry of 'step_sizes'.
     """
+    min_step_sizes = np.min(step_sizes)
+    assert min_step_sizes >= 0
+    if min_step_sizes == 0:
+        step_sizes = np.clip(step_sizes, a_min=1e-12, a_max=None)
     # Iteratively populate the result vector:
     first_iteration = True
     while True:
@@ -78,55 +224,20 @@ def gaussian_propagator(step_sizes):
         np.random.uniform(0, 1, len(step_sizes))))
     return result
 
-def _test_propagators(n=int(1e7)):
-##    step_sizes = 0.1 * np.ones(n, dtype='float64')
-##    print()
-##    t = {}
-##    for propagator, method in ((gaussian_propagator, 'gaussian'),
-##                               (ghosh_propagator,    'ghosh'   )):
-##        t[method] = []
-##        for i in range(10):
-##            start = time.perf_counter()
-##            propagator(step_sizes)
-##            end = time.perf_counter()
-##            t[method].append(end - start)
-##        print('%0.1f'%(1e9*np.mean(t[method]) / n),
-##              "nanoseconds per %s_propagator()"%(method))
-
-    def from_the_pole(n, propagator, time_step, n_steps):
-        dt = time_step / n_steps
-        step_size = np.sqrt(2*dt)
-        step_sizes = np.full(n, step_size)
-        x, y, z = np.zeros(n), np.zeros(n), np.ones(n)
-        for i in range(n_steps):
-            theta_d = propagator(step_sizes)
-            phi_d   = np.random.uniform(0, 2*np.pi, size=n)
-            assert np.all(theta_d < np.pi)
-            x, y, z = polar_displacement(x, y, z, theta_d, phi_d)
-        return x, y, z
-
-    gaussian, ghosh = [], []
-    for n_steps in (160, 80, 40, 20, 10, 5):
-        gaussian.append(from_the_pole(n, gaussian_propagator, 1, n_steps)[2])
-        ghosh.append(   from_the_pole(n,    ghosh_propagator, 1, n_steps)[2])
-    import matplotlib.pyplot as plt
-    for i, z in enumerate(gaussian):
-        hist, bin_edges = np.histogram(np.arccos(z), bins=30, range=(0, np.pi))
-        if i == 0:
-            ref = hist
-        plt.plot((bin_edges[1:] + bin_edges[:-1])/2, hist-ref, '-',  c='C%i'%i,
-                 label='Gauss %i'%i)
-    for i, z in enumerate(ghosh):
-        hist, bin_edges = np.histogram(np.arccos(z), bins=30, range=(0, np.pi))
-        plt.plot((bin_edges[1:] + bin_edges[:-1])/2, hist-ref, '.-', c='C%i'%i,
-                 label='Ghosh %i'%i)
-    plt.legend()
-    plt.show()
-
-
-    # Run many small Gaussians to generate a 'ground truth'
-    # Run one big Ghosh
-    # Run one big Gaussian
+def _test_propagators(n=int(1e6)):
+    step_sizes = 0.1 * np.ones(n, dtype='float64')
+    print()
+    t = {}
+    for propagator, method in ((gaussian_propagator, 'gaussian'),
+                               (ghosh_propagator,    'ghosh'   )):
+        t[method] = []
+        for i in range(10):
+            start = time.perf_counter()
+            propagator(step_sizes)
+            end = time.perf_counter()
+            t[method].append(end - start)
+        print('%0.1f'%(1e9*np.mean(t[method]) / n),
+              "nanoseconds per %s_propagator()"%(method))
 
 def polar_displacement(x, y, z, theta_d, phi_d, method='accurate', norm=True):
     """Take a Cartesian positions x, y, z and update them by
