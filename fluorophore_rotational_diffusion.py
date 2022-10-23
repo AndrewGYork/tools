@@ -41,12 +41,20 @@ class Fluorophores:
         assert isinstance(state_info, FluorophoreStates)
         self.state_info = state_info
 
-        assert initial_state in state_info
+        assert initial_state in state_info # Also raises an exception if invalid
         self.states = np.full(self.orientations.n, initial_state, dtype='uint')
         self.transition_times = exponential(
             self.state_info[initial_state].lifetime, self.orientations.n)
 
+        # The order of molecules isn't preserved, so we give them unique id's:
         self.id = np.arange(self.orientations.n, dtype='int')
+
+        # We record molecular orientation and time for each spontaneous
+        # transition. We use this information to simulate measurements,
+        # since spontaneous transitions (e.g. excited->ground) are often
+        # associated with emitting light:
+        self.transition_events = {
+            k: [] for k in ('x', 'y', 'z', 't', 'initial_state', 'final_state')}
         return None
 
     def phototransition(
@@ -119,18 +127,24 @@ class Fluorophores:
             o.x[s], o.y[s], o.z[s] = safe_diffusive_step(
                 o.x[s], o.y[s], o.z[s], (dt/o.diffusion_time)[s])
             o.t[s] += dt[s]
-            # Calculate spontaneous transitions
+            # Calculate and record spontaneous transitions
             transitioning = (o.t >= self.transition_times)
             states = self.states[transitioning] # Copy of states that change
+            if states.size == 0: continue # No states change; skip ahead.
+            t      = o.t[        transitioning]
+            self.transition_events['initial_state'].append(states)
+            self.transition_events['t'             ].append(t)
+            self.transition_events['x'             ].append(o.x[transitioning])
+            self.transition_events['y'             ].append(o.y[transitioning])
+            self.transition_events['z'             ].append(o.z[transitioning])
             idx = np.argsort(states)
             states = states[idx] # A sorted copy of the states that change
+            t = t[idx]
             transition_times = np.empty(len(states), dtype='float')
-            t = o.t[transitioning][idx]
             for initial_state in range(len(self.state_info)):
                 s = slice(np.searchsorted(states, initial_state, 'left'),
                           np.searchsorted(states, initial_state, 'right'))
-                if s.start == s.stop: # No population in this initial state
-                    continue
+                if s.start == s.stop: continue
                 fs = self.state_info[initial_state].final_states
                 final_states, lifetimes = self.state_info.n_and_lifetime(fs)
                 probabilities = self.state_info[initial_state].probabilities
@@ -142,8 +156,41 @@ class Fluorophores:
             # Undo our sorting of states and transition times, update originals
             idx_rev = np.empty_like(idx)
             idx_rev[idx] = np.arange(len(idx), dtype=idx.dtype)
-            self.states[          transitioning] = states[          idx_rev]
+            final_states = states[idx_rev]
+            self.transition_events['final_state'].append(final_states)
+            self.states[          transitioning] = final_states
             self.transition_times[transitioning] = transition_times[idx_rev]
+        return None
+
+    def get_xyzt_at_transition(self, initial_state, final_state):
+        assert initial_state in self.state_info
+        assert final_state in self.state_info
+        # We built 'self.transition_events' by appending 1D numpy arrays
+        # to lists. Now's a good time to join each list of arrays into
+        # a single array:
+        if len(self.transition_events['t']) == 0: # No transitions yet
+               return np.zeros(0), np.zeros(0), np.zeros(0), np.zeros(0)
+        if len(self.transition_events['t']) > 1:
+            for k, v in self.transition_events.items():
+                self.transition_events[k] = [np.concatenate(v)]
+        # Select only the records that correspond to a particular transition:
+        e = self.transition_events # Local nickname
+        tr = ((e['initial_state'][0] == self.state_info[initial_state].n) &
+              (e[  'final_state'][0] == self.state_info[  final_state].n))
+        x, y, z, t = e['x'][0][tr], e['y'][0][tr], e['z'][0][tr], e['t'][0][tr]
+        return x, y, z, t
+
+    def delete_state(self, state):
+        assert state in self.state_info
+        state = self.state_info[state].n # Convert to int
+        idx = (self.states != state)
+        self.states = self.states[idx]
+        self.transition_times = self.transition_times[idx]
+        o = self.orientations # Local nickname
+        o.x, o.y, o.z, o.t = o.x[idx], o.y[idx], o.z[idx], o.t[idx]
+        if o.diffusion_time.size == o.n:
+            o.diffusion_time = o.diffusion_time[idx]
+        self.id = self.id[idx]
         return None
 
     def _sort_by(self, x):
@@ -221,7 +268,7 @@ class FluorophoreStates:
     def n_and_lifetime(self, states):
         if isinstance(states, int) or isinstance(states, str):
             states = [states]
-        n        = np.asarray([self[s].n        for s in states], 'int')
+        n        = np.asarray([self[s].n        for s in states], 'uint')
         lifetime = np.asarray([self[s].lifetime for s in states], 'float')
         return n, lifetime
 
@@ -755,6 +802,9 @@ if __name__ == '__main__':
     f.phototransition('inactive', 'active',
                       intensity=10, polarization_xyz=(0, 0, 1))
     show(f)
+    print("\nRemoving inactive...")
+    f.delete_state('inactive')
+    show(f)
     print("\nExciting...")
     f.phototransition('active', 'excited',
                       intensity=10, polarization_xyz=(0, 0, 1))
@@ -762,6 +812,9 @@ if __name__ == '__main__':
     print("\nTime evolving...")
     f.time_evolve(1)
     show(f)
+    
+    x, y, z, t = f.get_xyzt_at_transition('excited', 'active')
+    print(len(t), "excited->active transition(s)")
 
     print("\nTesting performance...")
     _test_sin_cos()
@@ -771,7 +824,7 @@ if __name__ == '__main__':
     _test_diffusive_step_speed()
     _test_safe_diffusive_step()
     _test_fluorophores_speed()
-##    try:
-##        _test_diffusive_step_accuracy()
-##    except KeyboardInterrupt:
-##        pass
+    try:
+        _test_diffusive_step_accuracy()
+    except KeyboardInterrupt:
+        pass
