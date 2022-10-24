@@ -8,20 +8,20 @@ class Fluorophores:
     """
     An example usage, showing photoactivation and photoexcitation:
 
-    state_info = FluorophoreStates()
+    state_info = FluorophoreStateInfo()
     state_info.add('inactive')
     state_info.add('active')
     state_info.add('excited', lifetime=2, final_states='active')
 
     f = Fluorophores(
-        number_of_molecules=10,
+        number_of_molecules=6,
         diffusion_time=20,
         state_info=state_info)
     f.phototransition('inactive', 'active',
                       intensity=10, polarization_xyz=(0, 0, 1))
     f.phototransition('active', 'excited',
                       intensity=10, polarization_xyz=(0, 0, 1))
-    f.time_evolve(5)
+    f.time_evolve(1)
     """
     def __init__(
         self,
@@ -35,10 +35,10 @@ class Fluorophores:
                                          diffusion_time,
                                          initial_orientations)
         if state_info is None: # Default to the simplest photophysics
-            state_info = FluorophoreStates()
+            state_info = FluorophoreStateInfo()
             state_info.add('ground')
             state_info.add('excited', lifetime=1, final_states='ground')
-        assert isinstance(state_info, FluorophoreStates)
+        assert isinstance(state_info, FluorophoreStateInfo)
         self.state_info = state_info
 
         assert initial_state in state_info # Also raises an exception if invalid
@@ -131,12 +131,12 @@ class Fluorophores:
             transitioning = (o.t >= self.transition_times)
             states = self.states[transitioning] # Copy of states that change
             if states.size == 0: continue # No states change; skip ahead.
-            t      = o.t[        transitioning]
+            t = o.t[transitioning]
             self.transition_events['initial_state'].append(states)
-            self.transition_events['t'             ].append(t)
-            self.transition_events['x'             ].append(o.x[transitioning])
-            self.transition_events['y'             ].append(o.y[transitioning])
-            self.transition_events['z'             ].append(o.z[transitioning])
+            self.transition_events['t'            ].append(t)
+            self.transition_events['x'            ].append(o.x[transitioning])
+            self.transition_events['y'            ].append(o.y[transitioning])
+            self.transition_events['z'            ].append(o.z[transitioning])
             idx = np.argsort(states)
             states = states[idx] # A sorted copy of the states that change
             t = t[idx]
@@ -180,7 +180,7 @@ class Fluorophores:
         x, y, z, t = e['x'][0][tr], e['y'][0][tr], e['z'][0][tr], e['t'][0][tr]
         return x, y, z, t
 
-    def delete_state(self, state):
+    def delete_fluorophores_in_state(self, state):
         assert state in self.state_info
         state = self.state_info[state].n # Convert to int
         idx = (self.states != state)
@@ -236,7 +236,7 @@ def _test_fluorophores_speed(n=int(1e6)):
               dt/f.orientations.diffusion_time))
     return None
 
-class FluorophoreStates:
+class FluorophoreStateInfo:
     def __init__(self):
         self.clear()
 
@@ -275,7 +275,7 @@ class FluorophoreStates:
     def __getitem__(self, x):
         if not self.valid:
             raise LookupError(
-                "\nFluorophoreStates is not usable yet.\n" +
+                "\nFluorophoreStateInfo is not usable yet.\n" +
                 "State '%s'"%(self.orphan_state[0]) +
                 " has a final_state '%s'"%(self.orphan_state[1]) +
                 ", which has not been set with .add().")
@@ -284,7 +284,7 @@ class FluorophoreStates:
         elif isinstance(x, int):
             return self.list[x]
         else:
-            raise TypeError("FluorophoreStates indices must be"+
+            raise TypeError("FluorophoreStateInfo indices must be"+
                             " integers or strings")
 
     def __contains__(self, x):
@@ -774,7 +774,7 @@ def _test_sin_cos(n=int(1e6), dtype='float64'):
 
 if __name__ == '__main__':
     print("Simulating simple photoactivation/excitation photophysics...")
-    state_info = FluorophoreStates()
+    state_info = FluorophoreStateInfo()
     state_info.add('inactive')
     state_info.add('active')
     state_info.add('excited', lifetime=2, final_states='active')
@@ -803,7 +803,7 @@ if __name__ == '__main__':
                       intensity=10, polarization_xyz=(0, 0, 1))
     show(f)
     print("\nRemoving inactive...")
-    f.delete_state('inactive')
+    f.delete_fluorophores_in_state('inactive')
     show(f)
     print("\nExciting...")
     f.phototransition('active', 'excited',
