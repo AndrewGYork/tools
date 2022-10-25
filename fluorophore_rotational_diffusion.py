@@ -1,8 +1,36 @@
 #!/usr/bin/python
-import time
 import numpy as np
 from numpy.random import uniform, exponential, normal
 
+"""
+Time-resolved fluorescence anisotropy decay (TR-FA) is a powerful
+technique which reveals how fast an ensemble of fluorescent molecules
+"tumbles" (randomly changes orientation). This is especially interesting
+for molecular complexes in solution, where the rate of tumbling is
+directly proportional to the mass of the complex.
+
+I'm particularly interested in revealing the "mass spectrum" of the
+interaction partners of cellular proteins, tagged via GFP-like
+fluorescent proteins. Unfortunately, traditional TR-FA [1] doesn't work
+for this case; GFP's fluorescent lifetime is very short (~2-3 ns)
+compared to its "tumbling" time (~20 ns), so the decay is insensitive to
+the mass.
+
+However, we can break this limit by using longer-lived states! Recent
+ideas [2][3] show that the *concept* of TR-FA can work for a mass range
+that covers the entire human proteome, if we use different photophysics
+(e.g. photoactivation).
+
+The purpose of this module is to simulate this type of measurement. We
+model the orientation and "photostate" of an ensemble of molecules. You
+can define your own photophysics with a FluorophoreStateInfo() object, and
+then model time evolution (tumbling, spontaneous transitions) and
+light-driven state transitions with a Fluorophores() object.
+
+[1] doi.org/10.1007/978-0-387-46312-4_11
+[2] patents.google.com/patent/US20210247315A1
+[3] doi.org/10.1038/s41587-022-01489-7
+"""
 
 class Fluorophores:
     """
@@ -217,6 +245,7 @@ class Fluorophores:
         return idx
 
 def _test_fluorophores_speed(n=int(1e6)):
+    import time
     t = []
     for i in range(10):
         start = time.perf_counter()
@@ -252,7 +281,7 @@ def _test_fluorophores_anisotropy_decay_plot(n=int(1e8)):
         print("Matplotlib import failed; no graphical test of Fluorophores()")
         return None
 
-    print("Simulating classic anisotropy decay...", sep='', end='')
+    print("\nSimulating classic anisotropy decay...", sep='', end='')
     f = Fluorophores(n, diffusion_time=1)
     f.phototransition('ground', 'excited',
                       intensity=0.05, polarization_xyz=(1,0,0))
@@ -270,7 +299,8 @@ def _test_fluorophores_anisotropy_decay_plot(n=int(1e8)):
     bins = np.linspace(0, 3, 200)
     bin_centers = (bins[1:] + bins[:-1])/2
     (hist_x, _), (hist_y, _) = np.histogram(t_x, bins),  np.histogram(t_y, bins)
-    
+
+    print("Saving results in test_classic_anisotropy_decay.png...", end='')
     plt.figure()
     plt.plot(bin_centers, hist_x, '.-', label=r'$\parallel$ polarization')
     plt.plot(bin_centers, hist_y, '.-', label=r'$\perp$ polarization')
@@ -282,6 +312,7 @@ def _test_fluorophores_anisotropy_decay_plot(n=int(1e8)):
     plt.ylabel("Photons per time bin")
     plt.legend(); plt.grid('on')
     plt.savefig("test_classic_anisotropy_decay.png"); plt.close()
+    print("done.")
     return None
 
 class FluorophoreStateInfo:
@@ -460,6 +491,7 @@ def safe_diffusive_step(
     return x, y, z
 
 def _test_safe_diffusive_step(n=int(1e5)):
+    import time
     x, y, z = np.zeros(n), np.zeros(n), np.ones(n)
     print()
     for tstep in (np.array(5),
@@ -487,6 +519,7 @@ def diffusive_step(x, y, z, normalized_time_step, propagator='ghosh'):
     return polar_displacement(x, y, z, theta_d, phi_d)
 
 def _test_diffusive_step_speed(n=int(1e5)):
+    import time
     x, y, z = np.zeros(n), np.zeros(n), np.ones(n)
     t = {}
     print()
@@ -527,7 +560,9 @@ def _test_diffusive_step_accuracy(n=int(1e5)):
     # This takes a while to converge to good accuracy, so keep saving
     # intermediate figures as we make progress through the calculation.
     print("\nTesting diffusive_step() accuracy vs. step size.")
-    print("Use a KeyboardInterrupt (Ctrl-C) to abort")
+    print("This will keep running for an absurdly long time.")
+    print("The longer it runs, the more accurate the saved results become.")
+    print("Use a KeyboardInterrupt (Ctrl-C) to halt")
     print("Saving results in test_diffusive_step.png...", end='')
     for rep in range(20000): # A long, long time
         for prop in propagators:
@@ -632,6 +667,7 @@ def gaussian_propagator(step_sizes):
     return result
 
 def _test_propagators(n=int(1e6)):
+    import time
     step_sizes = 0.1 * np.ones(n, dtype='float64')
     print()
     t = {}
@@ -702,6 +738,7 @@ def polar_displacement(x, y, z, theta_d, phi_d, method='accurate', norm=True):
     return x_f, y_f, z_f
 
 def _test_polar_displacement(n=int(1e6), dtype='float64', norm=True):
+    import time
     theta_d =    np.abs(normal(  0,   np.pi, size=n)).astype(dtype)
     phi_d   =           uniform( 0, 2*np.pi, size=n ).astype(dtype)
 
@@ -748,6 +785,7 @@ def to_xyz(theta, phi, method='ugly'):
     return x, y, z
 
 def _test_to_xyz(n=int(1e6), dtype='float64'):
+    import time
     theta = uniform(0,   np.pi, size=n).astype(dtype)
     phi   = uniform(0, 2*np.pi, size=n).astype(dtype)
 
@@ -793,6 +831,7 @@ def sin_cos(radians, method='sqrt'):
     return sin, cos
 
 def _test_sin_cos(n=int(1e6), dtype='float64'):
+    import time
     """This test doesn't pass for float32, but neither does sin^2 + cos^2 == 1
     """
     theta = uniform(0,   np.pi, size=n).astype(dtype)
