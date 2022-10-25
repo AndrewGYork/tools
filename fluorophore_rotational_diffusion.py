@@ -19,9 +19,12 @@ class Fluorophores:
         state_info=state_info)
     f.phototransition('inactive', 'active',
                       intensity=10, polarization_xyz=(0, 0, 1))
+    f.delete_fluorophores_in_state('inactive')
     f.phototransition('active', 'excited',
                       intensity=10, polarization_xyz=(0, 0, 1))
     f.time_evolve(1)
+    x, y, z, t = f.get_xyzt_at_transitions('excited', 'active')
+    print(len(t) "spontaneous 'excited'->'active' transition(s) occured")
     """
     def __init__(
         self,
@@ -65,6 +68,7 @@ class Fluorophores:
         intensity=1,                # Saturation units
         polarization_xyz=(0, 0, 1), # Only the direction matters
         ):
+        if len(self.id) == 0: return None # No molecules, don't bother
         # Input sanitization
         assert initial_state in self.state_info
         initial_state = self.state_info[initial_state].n # Ensure int
@@ -113,6 +117,7 @@ class Fluorophores:
         return None
 
     def time_evolve(self, delta_t):
+        if len(self.id) == 0: return None # No molecules, don't bother
         assert delta_t > 0
         o = self.orientations # Local nickname
         assert np.isclose(o.t.min(), o.t.max()) # Orientations are synchronized
@@ -162,7 +167,7 @@ class Fluorophores:
             self.transition_times[transitioning] = transition_times[idx_rev]
         return None
 
-    def get_xyzt_at_transition(self, initial_state, final_state):
+    def get_xyzt_at_transitions(self, initial_state, final_state):
         assert initial_state in self.state_info
         assert final_state in self.state_info
         # We built 'self.transition_events' by appending 1D numpy arrays
@@ -181,6 +186,7 @@ class Fluorophores:
         return x, y, z, t
 
     def delete_fluorophores_in_state(self, state):
+        if len(self.id) == 0: return None # No molecules, don't bother
         assert state in self.state_info
         state = self.state_info[state].n # Convert to int
         idx = (self.states != state)
@@ -188,12 +194,15 @@ class Fluorophores:
         self.transition_times = self.transition_times[idx]
         o = self.orientations # Local nickname
         o.x, o.y, o.z, o.t = o.x[idx], o.y[idx], o.z[idx], o.t[idx]
-        if o.diffusion_time.size == o.n:
+        o.n = len(o.t)
+        if o.diffusion_time.shape == (o.n,):
             o.diffusion_time = o.diffusion_time[idx]
         self.id = self.id[idx]
         return None
 
     def _sort_by(self, x):
+        x = np.asarray(x)
+        assert x.shape == self.id.shape
         x_is_sorted = np.all(np.diff(x) >= 0)
         if x_is_sorted:
             return None
@@ -234,6 +243,45 @@ def _test_fluorophores_speed(n=int(1e6)):
     print('%0.1f nanoseconds per'%(1e9*t / f.orientations.n),
           "fluorophore time evolving for %0.1f diffusion times"%(
               dt/f.orientations.diffusion_time))
+    return None
+
+def _test_fluorophores_anisotropy_decay_plot(n=int(1e8)):
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("Matplotlib import failed; no graphical test of Fluorophores()")
+        return None
+
+    print("Simulating classic anisotropy decay...", sep='', end='')
+    f = Fluorophores(n, diffusion_time=1)
+    f.phototransition('ground', 'excited',
+                      intensity=0.05, polarization_xyz=(1,0,0))
+    while f.orientations.n > 0:
+        print('.', sep='', end='')
+        f.delete_fluorophores_in_state('ground')
+        f.time_evolve(0.3)
+    print("done.")
+    x, y, z, t = f.get_xyzt_at_transitions('excited', 'ground')
+    p_x, p_y = x**2, y**2 # Probabilities of landing in channel x or y
+    r = uniform(0, 1, size=len(t))
+    in_channel_x = (r < p_x)
+    in_channel_y = (p_x <= r) & (r < p_x + p_y)
+    t_x, t_y = t[in_channel_x], t[in_channel_y]
+    bins = np.linspace(0, 3, 200)
+    bin_centers = (bins[1:] + bins[:-1])/2
+    (hist_x, _), (hist_y, _) = np.histogram(t_x, bins),  np.histogram(t_y, bins)
+    
+    plt.figure()
+    plt.plot(bin_centers, hist_x, '.-', label=r'$\parallel$ polarization')
+    plt.plot(bin_centers, hist_y, '.-', label=r'$\perp$ polarization')
+    plt.title(
+        "Simulation of classic time-resolved anisotropy decay\n" +
+        r"$\tau_f$=%0.1f, $\tau_d$=%0.1f"%(f.state_info['excited'].lifetime,
+                                           f.orientations.diffusion_time))
+    plt.xlabel(r"Time (t/$\tau_f$)")
+    plt.ylabel("Photons per time bin")
+    plt.legend(); plt.grid('on')
+    plt.savefig("test_classic_anisotropy_decay.png"); plt.close()
     return None
 
 class FluorophoreStateInfo:
@@ -341,7 +389,7 @@ class Orientations:
         initial_orientations='uniform',
         ):
         """A class to simulate the orientations of an ensemble of freely
-        rotating molecules, effectively a randomn walk on a sphere.
+        rotating molecules, effectively a random walk on a sphere.
 
         Time evolution consists of rotational diffusion of orientation.
         You get to choose the "diffusion_time" (roughly, how long it
@@ -813,7 +861,7 @@ if __name__ == '__main__':
     f.time_evolve(1)
     show(f)
     
-    x, y, z, t = f.get_xyzt_at_transition('excited', 'active')
+    x, y, z, t = f.get_xyzt_at_transitions('excited', 'active')
     print(len(t), "excited->active transition(s)")
 
     print("\nTesting performance...")
@@ -824,6 +872,7 @@ if __name__ == '__main__':
     _test_diffusive_step_speed()
     _test_safe_diffusive_step()
     _test_fluorophores_speed()
+    _test_fluorophores_anisotropy_decay_plot()
     try:
         _test_diffusive_step_accuracy()
     except KeyboardInterrupt:
