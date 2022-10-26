@@ -229,9 +229,9 @@ class Fluorophores:
         self.transition_times = self.transition_times[idx]
         o = self.orientations # Local nickname
         o.x, o.y, o.z, o.t = o.x[idx], o.y[idx], o.z[idx], o.t[idx]
-        o.n = len(o.t)
         if o.diffusion_time.shape == (o.n,):
             o.diffusion_time = o.diffusion_time[idx]
+        o.n = len(o.t)
         self.id = self.id[idx]
         return None
 
