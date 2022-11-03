@@ -12,6 +12,11 @@ except ImportError:
     torch = None
     dtype = np.float64
 
+""" Created by Nathaniel H. Thayer and Andrew G. York
+
+A simple ray tracer for optical design.
+"""
+
 class NumpyOrTorch:
     """
     NumpyOrTorch is (roughly) an alias for torch on the gpu if it's
