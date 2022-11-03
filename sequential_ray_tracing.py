@@ -1,6 +1,5 @@
 import warnings
 import numpy as np
-import matplotlib.pyplot as plt
 try:
     import torch
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -8,6 +7,10 @@ try:
 except ImportError:
     torch = None
     dtype = np.float64
+try:
+    import matplotlib.pyplot as plt
+except ImportError:
+    plt = None
 
 """ Created by Nathaniel H. Thayer and Andrew G. York
 
