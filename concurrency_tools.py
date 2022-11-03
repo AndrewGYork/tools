@@ -21,7 +21,8 @@ except ImportError:
     shared_memory = None
     np = None
 
-'''
+''' Created by Nathaniel H. Thayer and Andrew G. York
+
 Sometimes we put a computationally demanding Python object in a
 multiprocessing child process, but this usually leads to high mental
 overhead. Using pipes and queues for calling methods, getting/setting
