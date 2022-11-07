@@ -513,13 +513,14 @@ def conical_bundle(
     cone_angle=np.pi/32,
     num_cones=7, points_per_cone=51,
     wavelength_um=0.488,
+    inner_cone_angle=0,
     ):
     """A pointlike emitter at (x, y, z), emitting in the (kx, ky, kz) direction.
 
     Note that 'cone_angle' is the full angle of the cone, not the half-angle.
     """
     num_rays = num_cones * points_per_cone
-    theta = np.linspace(0, cone_angle/2, num_cones)
+    theta = np.linspace(inner_cone_angle/2, cone_angle/2, num_cones)
     phi   = np.linspace(0,      2*np.pi, points_per_cone)
     sin_th, cos_th = np.sin(theta), np.cos(theta)
     sin_ph, cos_ph = np.sin(phi),   np.cos(phi)
