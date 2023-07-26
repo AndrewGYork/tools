@@ -73,6 +73,7 @@ class Fluorophores:
         self.state_info = state_info
 
         assert initial_state in state_info # Also raises an exception if invalid
+        initial_state = state_info[initial_state].n # Ensure it's an integer
         self.states = np.full(self.orientations.n, initial_state, dtype='uint')
         self.transition_times = exponential(
             self.state_info[initial_state].lifetime, self.orientations.n)
@@ -306,20 +307,53 @@ def _test_fluorophores_anisotropy_decay_plot(n=int(1e8)):
     t_x, t_y = t[in_channel_x], t[in_channel_y]
     bins = np.linspace(0, 3, 200)
     bin_centers = (bins[1:] + bins[:-1])/2
-    (hist_x, _), (hist_y, _) = np.histogram(t_x, bins),  np.histogram(t_y, bins)
-
+    (hist_x1, _), (hist_y1, _) = np.histogram(t_x, bins),  np.histogram(t_y, bins)
+    
+    ## This ought to yield equivalent results to the above. If these
+    ## two examples don't overlay, there is a bug.
+    print("\nSimulating classic anisotropy decay with vibrational relaxation...",
+          sep='', end='')
+    state_info = FluorophoreStateInfo()
+    state_info.add('ground')
+    state_info.add('ground+',  lifetime=0.001, final_states='ground')
+    state_info.add('excited+', lifetime=0.001, final_states='excited')
+    state_info.add('excited',  lifetime=1,     final_states='ground+')    
+    f = Fluorophores(n, diffusion_time=1, state_info=state_info)
+    f.phototransition('ground', 'excited+',
+                      intensity=0.05, polarization_xyz=(1,0,0))
+    while f.orientations.n > 0:
+        print('.', sep='', end='')
+        f.delete_fluorophores_in_state('ground')
+        f.time_evolve(0.3)
+    print("done.")
+    x, y, z, t = f.get_xyzt_at_transitions('excited', 'ground+')
+    p_x, p_y = x**2, y**2 # Probabilities of landing in channel x or y
+    r = uniform(0, 1, size=len(t))
+    in_channel_x = (r < p_x)
+    in_channel_y = (p_x <= r) & (r < p_x + p_y)
+    t_x, t_y = t[in_channel_x], t[in_channel_y]
+    bins = np.linspace(0, 3, 200)
+    bin_centers = (bins[1:] + bins[:-1])/2
+    (hist_x2, _), (hist_y2, _) = np.histogram(t_x, bins),  np.histogram(t_y, bins)
+    
     print("Saving results in test_classic_anisotropy_decay.png...", end='')
     plt.figure()
-    plt.plot(bin_centers, hist_x, '.-', label=r'$\parallel$ polarization')
-    plt.plot(bin_centers, hist_y, '.-', label=r'$\perp$ polarization')
+    plt.plot(bin_centers, hist_x1, '.-', label=r'$\parallel$ polarization')
+    plt.plot(bin_centers, hist_y1, '.-', label=r'$\perp$ polarization')
+    plt.plot(bin_centers, hist_x2, '.-',
+             label=r'$\parallel$ polarization + intermediate')
+    plt.plot(bin_centers, hist_y2, '.-',
+             label=r'$\perp$ polarization + intermediate')
     plt.title(
         "Simulation of classic time-resolved anisotropy decay\n" +
+        "with and without intermediate vibrational relaxation\n" +
         r"$\tau_f$=%0.1f, $\tau_d$=%0.1f"%(f.state_info['excited'].lifetime,
                                            f.orientations.diffusion_time))
     plt.xlabel(r"Time (t/$\tau_f$)")
     plt.ylabel("Photons per time bin")
     plt.legend(); plt.grid('on')
-    plt.savefig("test_classic_anisotropy_decay.png"); plt.close()
+    plt.savefig("test_classic_anisotropy_decay.png", bbox_inches='tight')
+    plt.close()
     print("done.")
     return None
 
