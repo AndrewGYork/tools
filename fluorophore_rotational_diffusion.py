@@ -174,9 +174,10 @@ class Fluorophores:
             states = states[idx] # A sorted copy of the states that change
             t = t[idx]
             transition_times = np.empty(len(states), dtype='float')
-            for initial_state in range(len(self.state_info)):
-                s = slice(np.searchsorted(states, initial_state, 'left'),
-                          np.searchsorted(states, initial_state, 'right'))
+            state_slices = [slice(np.searchsorted(states, initial_state, 'left'),
+                                  np.searchsorted(states, initial_state, 'right'))
+                            for initial_state in range(len(self.state_info))]
+            for initial_state, s in enumerate(state_slices):
                 if s.start == s.stop: continue
                 fs = self.state_info[initial_state].final_states
                 final_states, lifetimes = self.state_info.n_and_lifetime(fs)
