@@ -414,7 +414,7 @@ class ResultThread(threading.Thread):
         """
         super().join(timeout=timeout)
         if self.is_alive(): ## Thread could potentially not be done yet!
-            return TimeoutError('Thread did not return!')
+            raise TimeoutError('Thread did not return!')
         if hasattr(self, 'exc_value'):
             raise self.exc_value
         return self._return
