@@ -720,7 +720,7 @@ class _Custody:
         else:
             if self.target_resource is None:
                 return
-            waiting_list, waiting_list_lock = _get_list_and_lock(resource)
+            waiting_list, waiting_list_lock = _get_list_and_lock(self.target_resource)
             with waiting_list_lock:
                 waiting_list.remove(self)
 
@@ -1025,6 +1025,66 @@ class TestResultThreadAndCustodyThread(MyTestClass):
             th.join()
         finally: # if anything goes wrong, make sure the thread exits
             mutable_variables['step'] = -1
+
+    def test_custody_release(self):
+        resource = _WaitingList()
+        def f(custody, raise_exception=False):
+            custody.switch_from(None, resource)
+            if raise_exception:
+                raise ValueError("This exception was raised on purpose!")
+            custody.switch_from(resource, None)
+            return
+        ## Test releasing custody of thread that completed normally
+        th = CustodyThread(target=f, first_resource=resource).start()
+        th.join()
+        assert not th.custody.has_custody, (
+            'Should not have custody. Should have finished.'
+        )
+        th.custody.release()
+
+        ## Test releasing custody of thread that raised an exception
+        th = CustodyThread(
+            target=f, 
+            first_resource=resource, 
+            kwargs={'raise_exception': True}
+        ).start()
+        try:
+            th.get_result()
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("We didn't get the exception we expected...")
+        assert th.custody.has_custody, 'Should have custody.'
+        th.custody.release()
+        assert not th.custody.has_custody, 'Should not have custody.'
+        assert th.custody.target_resource is None
+
+        ## Testing releasing potential custody of thread in waiting list
+        th1 = CustodyThread(target=f, first_resource=resource)
+        th2 = CustodyThread(
+            target=f, 
+            first_resource=resource, 
+            kwargs={'raise_exception': True}
+        )
+        th3 = CustodyThread(target=f, first_resource=resource)
+        assert not th2.custody.has_custody, (
+            'Should not have custody. th1 should have it.'
+        )
+        target_resource = th2.custody.target_resource
+        waiting_list, _ = _get_list_and_lock(target_resource)
+        assert th2.custody in waiting_list
+        assert th3.custody in waiting_list
+        th2.custody.release()
+        waiting_list, _ = _get_list_and_lock(target_resource)
+        assert not th2.custody in waiting_list
+        assert th3.custody in waiting_list
+        th1.start()
+        th2.start()
+        th3.start()
+        th1.get_result()
+        # th2.get_result() # Not going to bother with the exception
+        th3.get_result() # Thread 3 can now get custody
+
 
 class TestSharedNDArray(MyTestClass):
     """Various tests of the SharedNDArray class"""
