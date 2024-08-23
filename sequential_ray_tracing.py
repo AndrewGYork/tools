@@ -347,9 +347,13 @@ class CylindricalSurface:
         return RayBundle(xyz_f, k_xyz_f, wavelength_um=ray_bundle.wavelength_um,
                          enforce_normalized_k=False)
 
-class PlanarRelay(PlanarSurface):
-    """A pair of image planes surrounding a PlanarSurface. The first
-    image plane is imaged perfectly onto the second.
+class PlanarLens(PlanarSurface):
+    """A pair of planes surrounding a PlanarSurface. The first
+    plane is transformed perfectly onto the second, such that
+    positions become angles and angles become positions.
+
+    The angle-to-position mapping is:
+        k_transverse * focal_length = x_transverse
 
     Unlike the previous surfaces, this surface is defined by its
     (idealized) behavior, rather than simply its geometry.
@@ -358,53 +362,54 @@ class PlanarRelay(PlanarSurface):
         self,
         x, y, z,
         kx, ky, kz,
+        focal_length,
         input_distance=0,
         output_distance=0,
+        input_index=1,
         output_index=1,
-        magnification=None,
         allow_backwards=False,
         ):
+        self.focal_length    = npt.as_tensor(focal_length   ).reshape(1)
         self.input_distance  = npt.as_tensor(input_distance ).reshape(1)
         self.output_distance = npt.as_tensor(output_distance).reshape(1)
+        self.input_index  = input_index
         self.output_index = output_index
-        if magnification is None:
-            self.magnification = None
-        else:
-            self.magnification = npt.as_tensor(magnification).reshape(1)
         super().__init__(x, y, z, kx, ky, kz, allow_backwards)
 
     def trace(self, ray_bundle, ni, nf):
         """Traces one ray bundle.
         """
-        # Trace back to the 'input image plane' of the optic:
+        n_in, n_out = self.input_index, self.output_index # Nicknames
+        # Trace to the 'entrance face' of the optic:
+        entrance_plane = PlanarSurface(*self.xyz, *self.k_xyz)
+        ray_bundle = entrance_plane.trace(ray_bundle, ni, n_in)
+        
+        # Trace (back?) to the 'input image plane' of the optic:
         input_image_plane = PlanarSurface(
             *(self.xyz + self.k_xyz*self.input_distance),
             *self.k_xyz,
             allow_backwards=True)
-        ray_bundle = input_image_plane.trace(ray_bundle, ni, ni)
-
-        # Optionally, magnify the image:
-        if self.magnification is not None:
-            # xyz magnification is easy: scale by M, centered on
-            # input_image_plane.xyz:
-            M = self.magnification
-            ray_bundle.xyz = ray_bundle.xyz*M + input_image_plane.xyz*(1-M)
-            # k_xyz magnification is equivalent to scaling the
-            # refractive index by M:
-            ray_bundle.k_xyz = deflection(
-                ray_bundle, self.k_xyz, ni, M*self.output_index)
-
+        ray_bundle = input_image_plane.trace(ray_bundle, n_in, n_in)
+        
+        # Transform positions to angles and angles to positions:
+        x_t = ray_bundle.xyz - input_image_plane.xyz
+        k_t = perpendicular_component(ray_bundle.k_xyz, self.k_xyz)
+        f = self.focal_length
+        #  Transverse position at the back focal plane is proportional to 
+        #  the transverse component of the k-vector at the front focal plane:
+        ray_bundle.xyz = input_image_plane.xyz + f*k_t*n_in
+        #  Transverse component of the k-vector at the back focal plane is
+        #  proportional to the transverse position at the front focal plane:
+        with np.errstate(invalid='ignore'):
+            ray_bundle.k_xyz = -x_t/f + self.k_xyz * np.sqrt(1 - sq_mag(x_t/f))
         # Shift to the 'output image plane' of the optic:
         ray_bundle.xyz = ray_bundle.xyz + self.k_xyz * (self.output_distance -
                                                         self.input_distance)
-
-        # Trace back to the output surface:
-        output_surface = PlanarSurface(
-            *self.xyz,
-            *self.k_xyz,
-            allow_backwards=True)
-        return output_surface.trace(ray_bundle, self.output_index, nf)
-
+    
+        # Trace (back?) to the output surface:
+        output_surface = PlanarSurface(*self.xyz, *self.k_xyz,
+                                       allow_backwards=True)
+        return output_surface.trace(ray_bundle, n_out, nf)
 
 def deflection(ray_bundle, surface_normal, ni, nf, reflect=False):
     """Given an array of incident k-vectors and surface normal vectors,
@@ -414,9 +419,7 @@ def deflection(ray_bundle, surface_normal, ni, nf, reflect=False):
     k_in, wavelength_um = ray_bundle.k_xyz, ray_bundle.wavelength_um
     assert all_unit_vectors(k_in)
     assert all_unit_vectors(surface_normal)
-    if reflect: # Mathematically conceivable, but physically impossible
-        assert ni == nf
-    elif ni == nf: # No refraction or reflection, leave the rays undeviated
+    if ni == nf and not reflect: # Leave the rays undeviated
         return npt.clone(k_in)
     ni, nf = index2float(ni, wavelength_um), index2float(nf, wavelength_um)
 
