@@ -352,7 +352,7 @@ class PlanarLens(PlanarSurface):
     plane is transformed perfectly onto the second, such that
     positions become angles and angles become positions.
 
-    When ni = input_index,  the angle-to-position mapping is:
+    When ni =  input_index, the angle-to-position mapping is:
         ni * k_transverse_i * focal_length = x_transverse_f
     When nf = output_index, the position-to-angle mapping is:
         x_transverse_i = nf * k_transverse_f * focal_length
@@ -398,14 +398,14 @@ class PlanarLens(PlanarSurface):
         k_t = perpendicular_component(ray_bundle.k_xyz, self.k_xyz)
         f = self.focal_length
         #  Transverse position at the output plane is proportional to 
-        #  the transverse k-vector times the input index at the input plane:
+        #  the input index times the transverse k-vector at the input plane:
         ray_bundle.xyz = input_image_plane.xyz + n_in*k_t*f
-        #  Transverse k-vector times the input index at the input plane
-        #  is proportional to the transverse position at the output plane:
+        #  Output index times the transverse k-vector at the output plane
+        #  is proportional to the transverse position at the input plane:
         k_t_out = -x_t/(f*n_out)
         with np.errstate(invalid='ignore'):
             k_n_out = self.k_xyz * np.sqrt(1 - sq_mag(k_t_out))
-        ray_bundle.k_xyz = k_t_out + k_n_out
+        ray_bundle.k_xyz = k_t_out + k_n_out # Transverse + normal components
         # Shift to the 'output image plane' of the optic:
         ray_bundle.xyz = ray_bundle.xyz + self.k_xyz * (self.output_distance -
                                                         self.input_distance)
