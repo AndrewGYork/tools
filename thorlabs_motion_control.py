@@ -9,7 +9,7 @@ import serial # So we can send serial commands over a COM port.
 class MFF10x:
     """
     A simple filter flipper from ThorLabs.
-    https://www.thorlabs.com/thorproduct.cfm?partnumber=MFF102/M
+    Tested with: www.thorlabs.com/thorproduct.cfm?partnumber=MFF102/M
     """
     def __init__(self, which_port, verbose=True):
         """
@@ -17,12 +17,12 @@ class MFF10x:
         it's hardware/firmware that we support, and then get its current
         position.
         """
+        assert verbose in (True, False)
         self.verbose = verbose # Prints statements about initialization/moving.
         self.which_port = which_port
         if self.verbose:
-            print('Opening ThorLabs MFF10x filter flipper on %s...'%(
-                  self.which_port),
-                  end='')
+            print('Opening ThorLabs MFF10x filter flipper on port %s...'%(
+                self.which_port), end='')
         try:
             self.port = serial.Serial(port=which_port,
                                       baudrate=115200,
@@ -30,52 +30,55 @@ class MFF10x:
         except serial.serialutil.SerialException:
             raise IOError('Unable to connect to MFF10x on %s'%which_port)
         self.refresh_attributes()
-        self._finish_moving()
-        if self.verbose:
-            print(' done.')
+        self._finish_moving() # Ensures we didn't wake up mid-move
+        if self.verbose: print(' done.')
         return None
             
     def refresh_attributes(self):
         """
-        Ask the device in the specified COM port what it is. Check that
+        Ask the device at the specified COM port what it is. Check that
         it's a MFF10x filter wheel.
         """
-        # Call MGMSG_HW_REQ_INFO:
+        # Send MGMSG_HW_REQ_INFO:
         self.port.write(b'\x05\x00\x00\x00\x50\x01')
         response = self.port.read(90)
         assert self.port.in_waiting == 0 # Make sure we read everything.
         header = response[0:6]
         assert header == b'\x06\x00\x54\x00\x81\x50'
+        # Serial number
         serial_number = int.from_bytes(response[6:10], byteorder='little')
         assert len(str(serial_number)) == 8
         self.serial_number = serial_number
-        
+        # Model number
         model_number = response[10:18].decode('ascii').rstrip('\x00')
         assert model_number == 'MFF002' # Different from printed model number.
         self.model_number = model_number
+        # Hardware type
         hardware_type = int.from_bytes(response[18:20],
                                        byteorder='little',
                                        signed=False)
-        assert hardware_type == 16
-        # I  a response of 16, but I expected a response of 44.
+        assert hardware_type == 16 # Docs suggest 44, but we always get 16(!?)
         self.hardware_type = hardware_type
+        # Firmware version
         firmware_version_minor_revision =   str(response[20])
         firmware_version_interim_revision = str(response[21])
         firmware_version_major_revision =   str(response[22])
         firmware_version = '.'.join([firmware_version_major_revision,
                                      firmware_version_interim_revision,
                                      firmware_version_minor_revision])
-
         assert firmware_version == '1.0.3'
         self.firmware_version = firmware_version
+        # Hardware version
         hardware_version = int.from_bytes(response[84:86], byteorder='little')
         assert hardware_version == 2 # I can't verify this is true.
         self.hardware_version = hardware_version
+        # "Mod state" - we don't know what this is.
         mod_state = int.from_bytes(response[86:88])
-        assert mod_state == 0 # I don't know what this is.
+        assert mod_state == 0
         self.mod_state = mod_state
+        # "Num channels" - we don't know what this is.
         num_channels = int.from_bytes(response[88:90])
-        assert num_channels == 256 # I don't know what this is.
+        assert num_channels == 256
         self.num_channels = num_channels
         return None
 
@@ -84,25 +87,26 @@ class MFF10x:
         Send a request to the filter flipper to change its position.
         Check that the motor is finished moving.
         """
-        if self.verbose:
-            print('Moving filter flipper to position %d...'%(
-                  requested_position),
-                  end='')
         assert requested_position in (1, 2)
-        requested_position_to_bits = {1: b'\x6A\x04\x00\x01\x50\x01',
-                                      2: b'\x6A\x04\x00\x02\x50\x01'}
-        # Call MGMSG_MOT_MOVE_JOG:
-        self.port.write(requested_position_to_bits[requested_position])
-        if finish_moving:
+        assert finish_moving in (True, False)
+        if self.might_be_moving: # If there's still a pending move, finish it.
             self._finish_moving()
         if self.verbose:
-            print(' done.')
+            print('Moving filter flipper to position %d...'%(
+                  requested_position), end='')
+        requested_position_to_bits = {1: b'\x6A\x04\x00\x01\x50\x01',
+                                      2: b'\x6A\x04\x00\x02\x50\x01'}
+        # Send MGMSG_MOT_MOVE_JOG:
+        self.port.write(requested_position_to_bits[requested_position])
+        self.might_be_moving = True
+        if finish_moving: self._finish_moving()
+        if self.verbose: print(' done.')
         return None
 
     def _refresh_status(self):
         """
-        Ask the filter flipper to return its status in raw bits. Use
-        them to populate attributes.
+        Ask the filter flipper to return its "status bits"; use them to
+        populate attributes.
         """
         # Call MGMSG_MOT_REQ_STATUSBITS:
         self.port.write(b'\x29\x04\x00\x00\x50\x01')
@@ -148,18 +152,19 @@ class MFF10x:
 
     def _finish_moving(self, max_polls=200):
         """
-        A function to call to block the script from progressing until
-        the filter flipper reports that it's finished moving. If it
-        doesn't report that it's done moving after two seconds, raise a
-        timeout exception.
+        Poll the filter flipper status until it reports that it's
+        finished moving. If it doesn't report that it's done moving
+        after two seconds, raise a timeout exception.
         """
-        for i in range(max_polls): # 200 polls is ~2 seconds.
+        for i in range(max_polls): # 200 polls is ~2 seconds on my machine
             self._refresh_status()
             if not self.moving:
+                self.might_be_moving = False
                 break
-        else:
-            raise TimeoutError('ThorLabs MFF10x on %s failed to finish moving.'%
-                               (self.which_port))
+        else: # Too many polls with no success; give up.
+            raise TimeoutError(
+                'ThorLabs MFF10x on port %s failed to finish moving.'%(
+                    self.which_port))
         return None
 
     def close(self):
@@ -167,9 +172,8 @@ class MFF10x:
         Close the COM port.
         """
         if self.verbose:
-            print("Closing ThorLabs MFF10x filter flipper on %s..."%(
-                                self.which_port),
-                                end='')
+            print("Closing ThorLabs MFF10x filter flipper on port %s..."%(
+                                self.which_port), end='')
         self.port.close()
         if self.verbose: print(' done.')
         return None
