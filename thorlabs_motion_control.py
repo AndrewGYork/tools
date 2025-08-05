@@ -128,7 +128,7 @@ class MFF10x:
         elif counterclockwise_limit and not clockwise_limit:
             self.position = 2
         else:
-            self.position = None # Weird but not impossible.
+            self.position = None # Weird, but not impossible.
 
         # Check if the motor is in motion. Although the motor
         # physically moves both clockwise and counterclockwise, the
