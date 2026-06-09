@@ -739,7 +739,7 @@ def plot_ray_bundle_sequence_3d(ray_bundle_sequence, ax, color='C0'):
 def plot_surface_3d(surface, ax, surface_diameter):
     bundle1 = collimated_bundle(radius=surface_diameter/2)
     bundle2 = surface.trace(bundle1, 1, 1)
-    valid = np.all(~np.isnan(bundle2.xyz), axis=0)
+    valid = npt.all(~npt.isnan(bundle2.xyz), axis=0)
     ax.plot_trisurf(*bundle2.xyz[:, valid], color='k', alpha=.3)
 
 def plot_all_surfaces_3d(optical_system, ax, surface_diameter=10):
@@ -804,7 +804,7 @@ def plot_surface_2d(surface, ax, surface_diameter=25.4):
     bundle1 = collimated_bundle(z=-1, radius=surface_diameter/2)
     bundle2 = surface.trace(bundle1, 1, 1)
     xyz = npt.asarray(bundle2.xyz)
-    valid = np.all(~np.isnan(xyz), axis=0)
+    valid = npt.all(~npt.isnan(xyz), axis=0)
     x, y, z = xyz[:, valid]
     _x = np.array([x[i] for i in range(len(x)) if abs(y[i])<.000001])
     _z = np.array([z[i] for i in range(len(z)) if abs(y[i])<.000001])
@@ -946,7 +946,3 @@ if __name__ == '__main__':
     torch = None
     dtype = np.float64
     test(True)
-            
-
-
-    
