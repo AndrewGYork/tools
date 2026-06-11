@@ -804,7 +804,7 @@ def plot_surface_2d(surface, ax, surface_diameter=25.4):
     bundle1 = collimated_bundle(z=-1, radius=surface_diameter/2)
     bundle2 = surface.trace(bundle1, 1, 1)
     xyz = npt.asarray(bundle2.xyz)
-    valid = npt.all(~npt.isnan(xyz), axis=0)
+    valid = np.all(~np.isnan(xyz), axis=0)
     x, y, z = xyz[:, valid]
     _x = np.array([x[i] for i in range(len(x)) if abs(y[i])<.000001])
     _z = np.array([z[i] for i in range(len(z)) if abs(y[i])<.000001])
